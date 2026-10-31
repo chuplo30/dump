@@ -66,8 +66,14 @@ def _client_ip() -> str:
 
 
 def _prune(dq: deque, now: float, window: float) -> None:
-    while dq and now - dq[0] > window:
-        dq.popleft()
+    # entries are either float timestamps or (ts, kind) tuples
+    while dq:
+        head = dq[0]
+        ts = head[0] if isinstance(head, tuple) else head
+        if now - ts > window:
+            dq.popleft()
+        else:
+            break
 
 
 def _rate_ok(kind: str) -> tuple[bool, str]:
