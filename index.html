@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="vi">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>WXZ Dump — VM String &amp; Lupro Hook</title>
+  <title>WXZ Dump — VM String Dump</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
@@ -14,7 +14,6 @@
       --muted: #8b9bb0;
       --steel: #b7c4d0;
       --surface: rgba(19, 22, 27, 0.72);
-      --surface-2: rgba(25, 30, 38, 0.82);
       --border: rgba(183, 196, 208, 0.14);
       --border-strong: rgba(183, 196, 208, 0.28);
       --accent: #6f9e7c;
@@ -25,365 +24,172 @@
       --font: "Inter", system-ui, sans-serif;
       --mono: "JetBrains Mono", ui-monospace, monospace;
     }
-
     * { box-sizing: border-box; margin: 0; padding: 0; }
-
-    html, body {
-      min-height: 100%;
-      font-family: var(--font);
-      color: var(--ink);
-      background: var(--bg);
-    }
-
+    html, body { min-height: 100%; font-family: var(--font); color: var(--ink); background: var(--bg); }
     body { overflow-x: hidden; }
 
-    /* ===== Video background ===== */
     .bg-video {
-      position: fixed;
-      inset: 0;
-      z-index: 0;
-      overflow: hidden;
-      pointer-events: none;
+      position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none;
     }
     .bg-video video {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      filter: grayscale(1) brightness(0.35) contrast(1.15);
-      transform: scale(1.04);
+      width: 100%; height: 100%; object-fit: cover;
+      filter: grayscale(1) brightness(0.35) contrast(1.15); transform: scale(1.04);
     }
     .bg-overlay {
-      position: absolute;
-      inset: 0;
+      position: absolute; inset: 0;
       background:
         radial-gradient(ellipse 80% 60% at 50% 0%, rgba(111, 158, 124, 0.12), transparent 55%),
         linear-gradient(180deg, rgba(7, 9, 12, 0.55) 0%, rgba(7, 9, 12, 0.78) 45%, rgba(7, 9, 12, 0.92) 100%);
     }
 
-    /* ===== Layout ===== */
     .app {
-      position: relative;
-      z-index: 1;
-      max-width: 1280px;
-      margin: 0 auto;
-      padding: 28px 20px 48px;
+      position: relative; z-index: 1; max-width: 1280px;
+      margin: 0 auto; padding: 28px 20px 48px;
     }
 
     header.top {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-      margin-bottom: 28px;
-      flex-wrap: wrap;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 16px; margin-bottom: 28px; flex-wrap: wrap;
     }
-
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-    }
+    .brand { display: flex; align-items: center; gap: 14px; }
     .brand-mark {
-      width: 44px;
-      height: 44px;
-      border-radius: 12px;
+      width: 44px; height: 44px; border-radius: 12px;
       background: linear-gradient(145deg, rgba(111, 158, 124, 0.35), rgba(19, 22, 27, 0.9));
       border: 1px solid var(--border-strong);
-      display: grid;
-      place-items: center;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      color: var(--accent);
+      display: grid; place-items: center; font-weight: 700;
+      letter-spacing: 0.04em; color: var(--accent);
       box-shadow: 0 0 24px var(--glow);
     }
-    .brand h1 {
-      font-size: 1.35rem;
-      font-weight: 700;
-      letter-spacing: -0.02em;
-    }
-    .brand p {
-      font-size: 0.8rem;
-      color: var(--muted);
-      margin-top: 2px;
-    }
+    .brand h1 { font-size: 1.35rem; font-weight: 700; letter-spacing: -0.02em; }
+    .brand p { font-size: 0.8rem; color: var(--muted); margin-top: 2px; }
 
     .badge {
-      font-size: 0.72rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      padding: 6px 12px;
-      border-radius: 999px;
-      border: 1px solid var(--border);
-      background: var(--surface);
-      color: var(--steel);
-      backdrop-filter: blur(12px);
+      font-size: 0.72rem; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.08em; padding: 6px 12px; border-radius: 999px;
+      border: 1px solid var(--border); background: var(--surface);
+      color: var(--steel); backdrop-filter: blur(12px);
     }
     .badge.live {
-      border-color: rgba(111, 158, 124, 0.4);
-      color: var(--accent);
-      background: var(--accent-dim);
+      border-color: rgba(111, 158, 124, 0.4); color: var(--accent); background: var(--accent-dim);
     }
 
-    /* ===== Glass cards ===== */
     .glass {
-      background: var(--surface);
-      border: 1px solid var(--border);
+      background: var(--surface); border: 1px solid var(--border);
       border-radius: var(--radius);
       backdrop-filter: blur(18px) saturate(1.2);
       -webkit-backdrop-filter: blur(18px) saturate(1.2);
-      box-shadow:
-        0 1px 0 rgba(255, 255, 255, 0.04) inset,
-        0 20px 50px rgba(0, 0, 0, 0.35);
+      box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 20px 50px rgba(0,0,0,0.35);
     }
-
-    .panel {
-      padding: 22px;
-      margin-bottom: 18px;
-    }
-
+    .panel { padding: 22px; margin-bottom: 18px; }
     .panel-title {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 16px;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; margin-bottom: 16px;
     }
-    .panel-title h2 {
-      font-size: 0.95rem;
-      font-weight: 600;
-      letter-spacing: -0.01em;
-    }
-    .panel-title span {
-      font-size: 0.75rem;
-      color: var(--muted);
-    }
+    .panel-title h2 { font-size: 0.95rem; font-weight: 600; letter-spacing: -0.01em; }
+    .panel-title span { font-size: 0.75rem; color: var(--muted); }
 
-    /* ===== Mode tabs ===== */
-    .modes {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      margin-bottom: 18px;
-    }
+    .modes { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
     .mode-btn {
-      appearance: none;
-      border: 1px solid var(--border);
-      background: rgba(19, 22, 27, 0.5);
-      color: var(--muted);
-      font: inherit;
-      font-size: 0.82rem;
-      font-weight: 500;
-      padding: 9px 16px;
-      border-radius: 999px;
-      cursor: pointer;
-      transition: 0.18s ease;
+      appearance: none; border: 1px solid var(--border);
+      background: rgba(19, 22, 27, 0.5); color: var(--muted);
+      font: inherit; font-size: 0.82rem; font-weight: 500;
+      padding: 9px 16px; border-radius: 999px; cursor: pointer; transition: 0.18s ease;
     }
-    .mode-btn:hover { color: var(--ink); border-color: var(--border-strong); }
     .mode-btn.active {
-      color: var(--accent);
-      border-color: rgba(111, 158, 124, 0.45);
-      background: var(--accent-dim);
-      box-shadow: 0 0 20px rgba(111, 158, 124, 0.15);
+      color: var(--accent); border-color: rgba(111, 158, 124, 0.45);
+      background: var(--accent-dim); box-shadow: 0 0 20px rgba(111, 158, 124, 0.15);
     }
 
-    /* ===== Inputs ===== */
-    .row {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 14px;
-    }
-    @media (max-width: 820px) {
-      .row { grid-template-columns: 1fr; }
-    }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    @media (max-width: 820px) { .row { grid-template-columns: 1fr; } }
 
     label.field-label {
-      display: block;
-      font-size: 0.75rem;
-      font-weight: 500;
-      color: var(--muted);
-      margin-bottom: 8px;
-      letter-spacing: 0.02em;
+      display: block; font-size: 0.75rem; font-weight: 500;
+      color: var(--muted); margin-bottom: 8px; letter-spacing: 0.02em;
     }
-
-    .input-wrap {
-      position: relative;
-    }
-
-    input[type="text"],
-    input[type="url"],
-    select,
-    textarea {
-      width: 100%;
-      font: inherit;
-      color: var(--ink);
-      background: rgba(7, 9, 12, 0.55);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 12px 14px;
-      outline: none;
+    input[type="text"], input[type="url"], textarea {
+      width: 100%; font: inherit; color: var(--ink);
+      background: rgba(7, 9, 12, 0.55); border: 1px solid var(--border);
+      border-radius: 12px; padding: 12px 14px; outline: none;
       transition: border-color 0.15s, box-shadow 0.15s;
     }
-    input:focus, select:focus, textarea:focus {
+    input:focus, textarea:focus {
       border-color: rgba(111, 158, 124, 0.5);
       box-shadow: 0 0 0 3px rgba(111, 158, 124, 0.12);
     }
     textarea {
-      font-family: var(--mono);
-      font-size: 0.8rem;
-      line-height: 1.55;
-      resize: vertical;
-      min-height: 220px;
+      font-family: var(--mono); font-size: 0.8rem; line-height: 1.55;
+      resize: vertical; min-height: 220px;
     }
-    textarea.output {
-      min-height: 320px;
-      background: rgba(5, 7, 10, 0.7);
-    }
+    textarea.output { min-height: 320px; background: rgba(5, 7, 10, 0.7); }
 
     .dropzone {
-      border: 1.5px dashed var(--border-strong);
-      border-radius: 14px;
-      padding: 28px 18px;
-      text-align: center;
-      background: rgba(7, 9, 12, 0.35);
-      cursor: pointer;
-      transition: 0.18s ease;
+      border: 1.5px dashed var(--border-strong); border-radius: 14px;
+      padding: 28px 18px; text-align: center; background: rgba(7, 9, 12, 0.35);
+      cursor: pointer; transition: 0.18s ease;
     }
     .dropzone:hover, .dropzone.drag {
-      border-color: rgba(111, 158, 124, 0.55);
-      background: var(--accent-dim);
+      border-color: rgba(111, 158, 124, 0.55); background: var(--accent-dim);
     }
-    .dropzone strong {
-      display: block;
-      font-size: 0.9rem;
-      margin-bottom: 6px;
-    }
-    .dropzone span {
-      font-size: 0.78rem;
-      color: var(--muted);
-    }
+    .dropzone strong { display: block; font-size: 0.9rem; margin-bottom: 6px; }
+    .dropzone span { font-size: 0.78rem; color: var(--muted); }
     .dropzone .file-name {
-      margin-top: 10px;
-      font-family: var(--mono);
-      font-size: 0.75rem;
-      color: var(--accent);
-      word-break: break-all;
+      margin-top: 10px; font-family: var(--mono); font-size: 0.75rem;
+      color: var(--accent); word-break: break-all;
     }
+    .hint { font-size: 0.75rem; color: var(--muted); margin-top: 8px; }
 
-    .hint {
-      font-size: 0.75rem;
-      color: var(--muted);
-      margin-top: 8px;
-    }
-
-    /* ===== Actions ===== */
-    .actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 16px;
-    }
-
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
     .btn {
-      appearance: none;
-      border: 1px solid transparent;
-      font: inherit;
-      font-size: 0.88rem;
-      font-weight: 600;
-      padding: 11px 20px;
-      border-radius: 12px;
-      cursor: pointer;
-      transition: 0.15s ease;
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
+      appearance: none; border: 1px solid transparent; font: inherit;
+      font-size: 0.88rem; font-weight: 600; padding: 11px 20px;
+      border-radius: 12px; cursor: pointer; transition: 0.15s ease;
+      display: inline-flex; align-items: center; gap: 8px;
     }
-    .btn:disabled {
-      opacity: 0.45;
-      cursor: not-allowed;
-    }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
     .btn-primary {
-      background: linear-gradient(180deg, #7eae8b, #5f8a6c);
-      color: #0b0d10;
+      background: linear-gradient(180deg, #7eae8b, #5f8a6c); color: #0b0d10;
       box-shadow: 0 8px 28px rgba(111, 158, 124, 0.28);
     }
     .btn-primary:hover:not(:disabled) {
-      filter: brightness(1.06);
-      box-shadow: 0 10px 32px rgba(111, 158, 124, 0.4);
+      filter: brightness(1.06); box-shadow: 0 10px 32px rgba(111, 158, 124, 0.4);
     }
     .btn-ghost {
-      background: rgba(19, 22, 27, 0.6);
-      border-color: var(--border);
-      color: var(--steel);
+      background: rgba(19, 22, 27, 0.6); border-color: var(--border); color: var(--steel);
     }
-    .btn-ghost:hover:not(:disabled) {
-      border-color: var(--border-strong);
-      color: var(--ink);
-    }
+    .btn-ghost:hover:not(:disabled) { border-color: var(--border-strong); color: var(--ink); }
 
-    /* ===== Status / log ===== */
     .status-bar {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      font-size: 0.8rem;
-      color: var(--muted);
-      min-height: 24px;
+      display: flex; align-items: center; gap: 10px;
+      font-size: 0.8rem; color: var(--muted); min-height: 24px; margin-top: 14px;
     }
-    .dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--muted);
-      flex-shrink: 0;
-    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
     .dot.run { background: #c9a227; box-shadow: 0 0 10px rgba(201, 162, 39, 0.5); animation: pulse 1s infinite; }
     .dot.ok { background: var(--accent); box-shadow: 0 0 10px var(--glow); }
     .dot.err { background: var(--danger); }
-
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.4; }
-    }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
     .log-box {
-      margin-top: 14px;
-      font-family: var(--mono);
-      font-size: 0.72rem;
-      line-height: 1.5;
-      color: var(--muted);
-      max-height: 120px;
-      overflow-y: auto;
-      white-space: pre-wrap;
-      padding: 10px 12px;
-      border-radius: 10px;
-      background: rgba(0, 0, 0, 0.35);
-      border: 1px solid var(--border);
+      margin-top: 14px; font-family: var(--mono); font-size: 0.72rem;
+      line-height: 1.5; color: var(--muted); max-height: 120px; overflow-y: auto;
+      white-space: pre-wrap; padding: 10px 12px; border-radius: 10px;
+      background: rgba(0,0,0,0.35); border: 1px solid var(--border);
     }
-
     .stats {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 16px;
-      margin-top: 12px;
-      font-size: 0.78rem;
-      color: var(--muted);
+      display: flex; flex-wrap: wrap; gap: 16px; margin-top: 12px;
+      font-size: 0.78rem; color: var(--muted);
     }
     .stats strong { color: var(--steel); font-weight: 600; }
 
     footer {
-      margin-top: 28px;
-      text-align: center;
-      font-size: 0.75rem;
-      color: var(--muted);
-      opacity: 0.85;
+      margin-top: 28px; text-align: center; font-size: 0.75rem;
+      color: var(--muted); opacity: 0.85;
     }
-    footer a { color: var(--steel); text-decoration: none; }
   </style>
 </head>
 <body>
   <div class="bg-video" aria-hidden="true">
-    <video autoplay muted loop playsinline poster="">
+    <video autoplay muted loop playsinline>
       <source src="/static/bg.mp4" type="video/mp4" />
     </video>
     <div class="bg-overlay"></div>
@@ -404,29 +210,29 @@
     <section class="glass panel">
       <div class="panel-title">
         <h2>Engine</h2>
-        <span>chọn pipeline deobf / dump</span>
+        <span>string dump pipeline</span>
       </div>
-      <div class="modes" id="modes">
+      <div class="modes">
         <button type="button" class="mode-btn active" data-mode="string_dump">String Dump · Thick Fake Env</button>
       </div>
-      <p class="hint" style="margin-top:-8px;margin-bottom:14px">Hook VM: loadstring · HttpGet · string.* · buffer · bit32 · soft Instance/game · virtual clock. Không cần lupro.</p>
+      <p class="hint" style="margin-bottom:14px">
+        Hooks: loadstring · HttpGet · string.* · buffer · bit32 · soft Instance/game · virtual clock.
+      </p>
 
       <div class="row">
         <div>
           <label class="field-label">Upload file (.lua / .luau / .txt)</label>
           <div class="dropzone" id="dropzone">
-            <strong>Kéo thả hoặc bấm để chọn file</strong>
-            <span>Hỗ trợ obfuscated script · max ~8MB</span>
+            <strong>Drop file here or click to browse</strong>
+            <span>Obfuscated scripts · max ~8MB</span>
             <div class="file-name" id="fileName" hidden></div>
             <input type="file" id="fileInput" accept=".lua,.luau,.txt,.obf" hidden />
           </div>
         </div>
         <div>
-          <label class="field-label">Hoặc dán link raw</label>
-          <div class="input-wrap">
-            <input type="url" id="urlInput" placeholder="https://pastefy.app/.../raw  ·  github raw  ·  pastebin raw" />
-          </div>
-          <p class="hint">Server sẽ fetch URL rồi chạy engine trên nội dung.</p>
+          <label class="field-label">Or paste a raw URL</label>
+          <input type="url" id="urlInput" placeholder="https://pastefy.app/.../raw  ·  GitHub raw  ·  Pastebin raw" />
+          <p class="hint">Server fetches the URL, then runs the dump engine on the body.</p>
         </div>
       </div>
     </section>
@@ -437,16 +243,14 @@
           <h2>Input</h2>
           <span id="inputMeta">0 bytes</span>
         </div>
-        <textarea id="inputCode" placeholder="-- dán source obfuscated vào đây&#10;-- hoặc upload / dán link phía trên" spellcheck="false"></textarea>
+        <textarea id="inputCode" placeholder="-- paste obfuscated source here&#10;-- or upload / paste a raw URL above" spellcheck="false"></textarea>
         <div class="actions">
-          <button type="button" class="btn btn-primary" id="runBtn">
-            <span>▶</span> Run dump
-          </button>
+          <button type="button" class="btn btn-primary" id="runBtn"><span>▶</span> Run dump</button>
           <button type="button" class="btn btn-ghost" id="clearIn">Clear input</button>
         </div>
-        <div class="status-bar" style="margin-top:14px">
+        <div class="status-bar">
           <span class="dot" id="statusDot"></span>
-          <span id="statusText">Sẵn sàng</span>
+          <span id="statusText">Ready</span>
         </div>
         <div class="log-box" id="logBox" hidden></div>
       </section>
@@ -456,7 +260,7 @@
           <h2>Output</h2>
           <span id="outputMeta">—</span>
         </div>
-        <textarea id="outputCode" class="output" readonly placeholder="Kết quả string dump / recovered source sẽ hiện ở đây…" spellcheck="false"></textarea>
+        <textarea id="outputCode" class="output" readonly placeholder="Dumped strings / recovered constants appear here…" spellcheck="false"></textarea>
         <div class="actions">
           <button type="button" class="btn btn-ghost" id="copyOut">Copy</button>
           <button type="button" class="btn btn-ghost" id="downloadOut">Download</button>
@@ -468,37 +272,22 @@
 
     <footer>
       WXZ Dump · glass UI · string_dump thick fake env · <span id="year"></span>
+      · health: <code style="color:var(--steel)">/health</code>
     </footer>
   </div>
 
   <script>
     const $ = (id) => document.getElementById(id);
-    const state = {
-      mode: "string_dump",
-      file: null,
-      running: false,
-    };
-
+    const state = { mode: "string_dump", file: null, running: false };
     $("year").textContent = new Date().getFullYear();
 
-    // Modes
-    document.querySelectorAll(".mode-btn").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        document.querySelectorAll(".mode-btn").forEach((b) => b.classList.remove("active"));
-        btn.classList.add("active");
-        state.mode = btn.dataset.mode;
-      });
-    });
-
-    // Dropzone
     const dz = $("dropzone");
     const fileInput = $("fileInput");
     dz.addEventListener("click", () => fileInput.click());
     dz.addEventListener("dragover", (e) => { e.preventDefault(); dz.classList.add("drag"); });
     dz.addEventListener("dragleave", () => dz.classList.remove("drag"));
     dz.addEventListener("drop", (e) => {
-      e.preventDefault();
-      dz.classList.remove("drag");
+      e.preventDefault(); dz.classList.remove("drag");
       if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
     });
     fileInput.addEventListener("change", () => {
@@ -510,10 +299,7 @@
       $("fileName").hidden = false;
       $("fileName").textContent = file.name + " · " + formatBytes(file.size);
       const reader = new FileReader();
-      reader.onload = () => {
-        $("inputCode").value = reader.result;
-        updateInputMeta();
-      };
+      reader.onload = () => { $("inputCode").value = reader.result; updateInputMeta(); };
       reader.readAsText(file);
     }
 
@@ -524,31 +310,21 @@
     $("inputCode").addEventListener("input", updateInputMeta);
 
     $("clearIn").addEventListener("click", () => {
-      $("inputCode").value = "";
-      state.file = null;
-      $("fileName").hidden = true;
-      $("urlInput").value = "";
-      updateInputMeta();
+      $("inputCode").value = ""; state.file = null;
+      $("fileName").hidden = true; $("urlInput").value = ""; updateInputMeta();
     });
     $("clearOut").addEventListener("click", () => {
-      $("outputCode").value = "";
-      $("outputMeta").textContent = "—";
-      $("stats").innerHTML = "";
+      $("outputCode").value = ""; $("outputMeta").textContent = "—"; $("stats").innerHTML = "";
     });
     $("copyOut").addEventListener("click", async () => {
-      const t = $("outputCode").value;
-      if (!t) return;
-      await navigator.clipboard.writeText(t);
-      setStatus("ok", "Đã copy output");
+      const t = $("outputCode").value; if (!t) return;
+      await navigator.clipboard.writeText(t); setStatus("ok", "Copied to clipboard");
     });
     $("downloadOut").addEventListener("click", () => {
-      const t = $("outputCode").value;
-      if (!t) return;
+      const t = $("outputCode").value; if (!t) return;
       const blob = new Blob([t], { type: "text/plain" });
       const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = "wxz_dump_out.lua";
-      a.click();
+      a.href = URL.createObjectURL(blob); a.download = "wxz_dump_out.lua"; a.click();
       URL.revokeObjectURL(a.href);
     });
 
@@ -557,34 +333,29 @@
       if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
       return (n / (1024 * 1024)).toFixed(2) + " MB";
     }
-
     function setStatus(kind, text) {
-      const dot = $("statusDot");
-      dot.className = "dot" + (kind ? " " + kind : "");
+      $("statusDot").className = "dot" + (kind ? " " + kind : "");
       $("statusText").textContent = text;
     }
-
     function log(msg) {
-      const box = $("logBox");
-      box.hidden = false;
-      const ts = new Date().toLocaleTimeString();
-      box.textContent += `[${ts}] ${msg}\n`;
+      const box = $("logBox"); box.hidden = false;
+      box.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
       box.scrollTop = box.scrollHeight;
     }
 
-    // Health
     async function checkServer() {
       try {
-        const r = await fetch("/api/health");
+        const r = await fetch("/health");
         const j = await r.json();
         $("serverBadge").textContent = j.lune ? "● online · lune ready" : "● online · lune missing";
         $("serverBadge").classList.toggle("live", !!j.ok);
       } catch {
-        $("serverBadge").textContent = "● offline — chạy server.py";
+        $("serverBadge").textContent = "● offline — start server.py";
         $("serverBadge").classList.remove("live");
       }
     }
     checkServer();
+    setInterval(checkServer, 30000);
 
     $("runBtn").addEventListener("click", runDump);
 
@@ -593,20 +364,16 @@
       const code = $("inputCode").value.trim();
       const url = $("urlInput").value.trim();
       if (!code && !url && !state.file) {
-        setStatus("err", "Cần input code, file hoặc URL");
+        setStatus("err", "Need source, file, or URL");
         return;
       }
-
-      state.running = true;
-      $("runBtn").disabled = true;
-      $("logBox").textContent = "";
-      $("logBox").hidden = false;
-      setStatus("run", "Đang chạy " + state.mode + "…");
-      log("mode=" + state.mode);
+      state.running = true; $("runBtn").disabled = true;
+      $("logBox").textContent = ""; $("logBox").hidden = false;
+      setStatus("run", "Running string dump…"); log("mode=string_dump");
 
       try {
         const fd = new FormData();
-        fd.append("mode", state.mode);
+        fd.append("mode", "string_dump");
         if (url) fd.append("url", url);
         if (code) fd.append("source", code);
         if (state.file) fd.append("file", state.file);
@@ -615,30 +382,26 @@
         const r = await fetch("/api/dump", { method: "POST", body: fd });
         const j = await r.json();
         const ms = ((performance.now() - t0) / 1000).toFixed(2);
-
         if (j.log) log(j.log);
+
         if (!r.ok || j.error) {
           setStatus("err", j.error || ("HTTP " + r.status));
           if (j.output) $("outputCode").value = j.output;
           return;
         }
-
         $("outputCode").value = j.output || "";
         $("outputMeta").textContent = formatBytes(new Blob([j.output || ""]).size) + " · " + ms + "s";
         $("stats").innerHTML =
-          `<span>engine <strong>${j.engine || state.mode}</strong></span>` +
+          `<span>engine <strong>${j.engine || "string_dump"}</strong></span>` +
           `<span>time <strong>${ms}s</strong></span>` +
           (j.lines != null ? `<span>lines <strong>${j.lines}</strong></span>` : "") +
           (j.urls ? `<span>urls <strong>${j.urls}</strong></span>` : "") +
           (j.loads != null ? `<span>loadstring <strong>${j.loads}</strong></span>` : "");
-        setStatus("ok", "Hoàn tất");
-        log("done " + ms + "s");
+        setStatus("ok", "Done"); log("done " + ms + "s");
       } catch (err) {
-        setStatus("err", String(err.message || err));
-        log(String(err));
+        setStatus("err", String(err.message || err)); log(String(err));
       } finally {
-        state.running = false;
-        $("runBtn").disabled = false;
+        state.running = false; $("runBtn").disabled = false;
       }
     }
   </script>

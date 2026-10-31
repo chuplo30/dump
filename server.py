@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WXZ Dump — string dump + thick fake env (no lupro required)."""
+"""WXZ Dump — Flask server for string dump + thick fake env (UptimeRobot-friendly)."""
 from __future__ import annotations
 
 import os
@@ -10,9 +10,7 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from flask import Flask, jsonify, request, send_from_directory
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent
@@ -25,38 +23,42 @@ for d in (UPLOADS, OUTPUTS):
 
 LUNE_CANDIDATES = [
     os.environ.get("LUNE_BIN"),
-    "/tmp/lune10/lune",
-    shutil.which("lune"),
     str(ROOT / "bin" / "lune"),
     str(ROOT / "lune"),
+    "/usr/local/bin/lune",
+    "/tmp/lune10/lune",
+    shutil.which("lune"),
 ]
 LUNE = next((p for p in LUNE_CANDIDATES if p and Path(p).is_file()), None)
-
 DUMP_ENGINE = TOOLS / "string_dump.luau"
 
-app = FastAPI(title="WXZ Dump", version="1.1")
-app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
+app = Flask(__name__, static_folder=str(STATIC), static_url_path="/static")
 
 
 @app.get("/")
 def index():
-    return FileResponse(ROOT / "index.html")
+    return send_from_directory(ROOT, "index.html")
 
 
+@app.get("/health")
 @app.get("/api/health")
 def health():
-    return {
-        "ok": True,
-        "lune": bool(LUNE),
-        "lune_path": LUNE,
-        "engine": DUMP_ENGINE.is_file(),
-    }
+    """Simple endpoint for UptimeRobot / monitors."""
+    return jsonify(
+        {
+            "ok": True,
+            "status": "up",
+            "lune": bool(LUNE),
+            "lune_path": LUNE,
+            "engine": DUMP_ENGINE.is_file(),
+        }
+    )
 
 
 def fetch_url(url: str, timeout: int = 25) -> str:
     if not re.match(r"^https?://", url, re.I):
         raise ValueError("URL must start with http:// or https://")
-    req = urllib.request.Request(url, headers={"User-Agent": "WXZ-Dump/1.1"}, method="GET")
+    req = urllib.request.Request(url, headers={"User-Agent": "WXZ-Dump/1.2"}, method="GET")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = resp.read()
     if len(data) > 12 * 1024 * 1024:
@@ -69,7 +71,7 @@ def run_dump(source: str, timeout: int = 150) -> dict:
         return {"error": "string_dump.luau missing in tools/", "output": ""}
     if not LUNE:
         return {
-            "error": "lune binary not found — put lune on PATH or set LUNE_BIN",
+            "error": "lune binary not found — install lune or set LUNE_BIN",
             "output": "",
         }
 
@@ -79,7 +81,8 @@ def run_dump(source: str, timeout: int = 150) -> dict:
     in_path.write_text(source, encoding="utf-8")
 
     env = os.environ.copy()
-    env["PATH"] = f"/tmp/lune10:{env.get('PATH', '')}"
+    bin_dir = str(Path(LUNE).parent)
+    env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
 
     cmd = [LUNE, "run", str(DUMP_ENGINE), str(in_path), str(out_path)]
     t0 = time.time()
@@ -134,48 +137,48 @@ def run_dump(source: str, timeout: int = 150) -> dict:
 
 
 @app.post("/api/dump")
-async def dump(
-    mode: str = Form("string_dump"),
-    source: str = Form(""),
-    url: str = Form(""),
-    file: UploadFile | None = File(None),
-):
-    text = (source or "").strip()
+def dump():
+    mode = (request.form.get("mode") or "string_dump").strip()
+    source = (request.form.get("source") or "").strip()
+    url = (request.form.get("url") or "").strip()
     log_parts = []
+    text = source
 
-    if file and file.filename:
-        raw = await file.read()
+    f = request.files.get("file")
+    if f and f.filename:
+        raw = f.read()
         if len(raw) > 10 * 1024 * 1024:
-            return JSONResponse({"error": "file too large"}, status_code=400)
+            return jsonify({"error": "file too large"}), 400
         text = raw.decode("utf-8", errors="replace")
-        log_parts.append(f"upload {file.filename} ({len(raw)} bytes)")
+        log_parts.append(f"upload {f.filename} ({len(raw)} bytes)")
 
-    if url and url.strip():
+    if url:
         try:
-            text = fetch_url(url.strip())
+            text = fetch_url(url)
             log_parts.append(f"fetched url ({len(text)} bytes)")
         except Exception as ex:
-            return JSONResponse({"error": f"fetch failed: {ex}"}, status_code=400)
+            return jsonify({"error": f"fetch failed: {ex}"}), 400
 
-    if not text.strip():
-        return JSONResponse({"error": "empty source"}, status_code=400)
+    if not (text or "").strip():
+        return jsonify({"error": "empty source"}), 400
     if len(text) > 12 * 1024 * 1024:
-        return JSONResponse({"error": "source too large"}, status_code=400)
+        return jsonify({"error": "source too large"}), 400
 
     result = run_dump(text)
     if log_parts:
         result["log"] = "\n".join(log_parts + [result.get("log") or ""]).strip()
 
     if result.get("error") and not result.get("output"):
-        return JSONResponse(result, status_code=500)
-    return result
+        return jsonify(result), 500
+    return jsonify(result)
 
 
 if __name__ == "__main__":
-    import uvicorn
-
     port = int(os.environ.get("PORT", "8765"))
-    print(f"WXZ Dump → http://127.0.0.1:{port}")
+    host = os.environ.get("HOST", "0.0.0.0")
+    print(f"WXZ Dump → http://{host}:{port}")
+    print(f"  health: http://{host}:{port}/health")
     print(f"  lune: {LUNE}")
     print(f"  engine: {DUMP_ENGINE.is_file()}")
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    # threaded=True so health checks don't block dumps
+    app.run(host=host, port=port, debug=False, threaded=True)
