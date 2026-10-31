@@ -23,9 +23,10 @@ for d in (UPLOADS, OUTPUTS):
 
 LUNE_CANDIDATES = [
     os.environ.get("LUNE_BIN"),
-    str(ROOT / "bin" / "lune"),
+    str(ROOT / "bin" / "lune"),          # bundled with this package
     str(ROOT / "lune"),
     "/usr/local/bin/lune",
+    str(Path.home() / "bin" / "lune"),
     "/tmp/lune10/lune",
     shutil.which("lune"),
 ]
