@@ -322,35 +322,269 @@ end
 
 pcall(harvestCode, source, "static")
 
--- WEAREDEVS_STATIC_WXZ: peel encoded string pool (T... / m... tokens)
+-- WEAREDEVS_FULL_DECODE_WXZ: fully decode T*/m* string pool without running VM
 do
-	local function wrdDecodeToken(tok)
-		if type(tok) ~= "string" or #tok < 2 then return nil end
-		local tag = string.sub(tok, 1, 1)
-		local body = string.sub(tok, 2)
-		if tag ~= "T" and tag ~= "m" then return nil end
-		-- best-effort: emit raw body + tag for analysis
-		return body
-	end
-	-- collect quoted tokens from leading array
-	local head = string.sub(source, 1, math.min(#source, 120000))
-	for tok in string.gmatch(head, '"([^"]+)"') do
-		if #tok >= 2 and #tok <= 200 then
-			local c0 = string.sub(tok, 1, 1)
-			if c0 == "T" or c0 == "m" then
-				emit("wearedevs.token", tok)
-				local body = wrdDecodeToken(tok)
-				if body and #body >= 1 then
-					emit("wearedevs.body", body)
+	local function wrdExtractArray(src)
+		-- match: local c={ ... } at start of WeAreDevs blob
+		local i = string.find(src, "local%s+[%w_]+%s*=%s*{", 1)
+		if not i then return nil end
+		local depth, j = 0, i
+		local startBrace = string.find(src, "{", i, true)
+		if not startBrace then return nil end
+		j = startBrace
+		depth = 1
+		j = j + 1
+		while j <= #src and depth > 0 do
+			local ch = string.sub(src, j, j)
+			if ch == "{" then depth = depth + 1
+			elseif ch == "}" then depth = depth - 1
+			elseif ch == '"' or ch == "'" then
+				local q = ch
+				j = j + 1
+				while j <= #src do
+					local c2 = string.sub(src, j, j)
+					if c2 == "\\" then j = j + 2
+					elseif c2 == q then break
+					else j = j + 1 end
 				end
 			end
+			j = j + 1
 		end
+		return string.sub(src, startBrace, j - 1)
 	end
-	if string.find(source, "wearedevs%.net/obfuscator", 1, true) or string.find(source, "WeAreDevs", 1, true) then
+
+	local function wrdParseStrings(arrLit)
+		local out = {}
+		local i = 1
+		while i <= #arrLit do
+			local c = string.sub(arrLit, i, i)
+			if c == '"' then
+				local buf = {}
+				i = i + 1
+				while i <= #arrLit do
+					local ch = string.sub(arrLit, i, i)
+					if ch == "\\" then
+						local n = string.sub(arrLit, i + 1, i + 1)
+						if n == "n" then buf[#buf+1] = "\n"; i = i + 2
+						elseif n == "t" then buf[#buf+1] = "\t"; i = i + 2
+						elseif n == "r" then buf[#buf+1] = "\r"; i = i + 2
+						elseif n == '"' then buf[#buf+1] = '"'; i = i + 2
+						elseif n == "\\" then buf[#buf+1] = "\\"; i = i + 2
+						elseif n == "'" then buf[#buf+1] = "'"; i = i + 2
+						else buf[#buf+1] = n; i = i + 2 end
+					elseif ch == '"' then
+						i = i + 1
+						break
+					else
+						buf[#buf+1] = ch
+						i = i + 1
+					end
+				end
+				out[#out+1] = table.concat(buf)
+			else
+				i = i + 1
+			end
+		end
+		return out
+	end
+
+	-- Alphabet maps reconstructed from typical WeAreDevs v1 payloads (numeric consts folded)
+	-- Runtime may differ slightly per build; we also eval maps from source when possible.
+	local function buildMapFromSource(src, marker)
+		-- very rough: not always present as clear table; fallback to runtime decode path
+		return nil
+	end
+
+	local function decodeT(body, mapO)
+		-- T-encoding: variable-width radix using mapO values, pack to bytes
+		if type(body) ~= "string" or #body < 1 then return nil end
+		local out = {}
+		local t = 1
+		local W = #body
+		while t <= W do
+			local remain = (W - t) + 1
+			local U = remain >= 5 and 5 or remain
+			local s = 0
+			local ok = U > 1
+			for c = 0, 4 do
+				local Wch
+				if c < U then
+					local ch = string.sub(body, t + c, t + c)
+					Wch = mapO[ch]
+					if not Wch then ok = false break end
+				else
+					Wch = 84 -- padding sentinel used in VM
+				end
+				s = s * 85 + Wch
+			end
+			if ok then
+				local b0 = math.floor(s / 16777216) % 256
+				local b1 = math.floor(s / 65536) % 256
+				local b2 = math.floor(s / 256) % 256
+				local b3 = s % 256
+				if U == 5 then
+					out[#out+1] = string.char(b0, b1, b2, b3)
+				elseif U == 4 then
+					out[#out+1] = string.char(b0, b1, b2)
+				elseif U == 3 then
+					out[#out+1] = string.char(b0, b1)
+				elseif U == 2 then
+					out[#out+1] = string.char(b0)
+				end
+			end
+			t = t + U
+		end
+		local r = table.concat(out)
+		return #r > 0 and r or nil
+	end
+
+	local function decodeM(body, mapK)
+		-- m-encoding: base64-like groups of 4 → 3 bytes
+		if type(body) ~= "string" or #body < 1 then return nil end
+		local out = {}
+		local t = 1
+		local O = #body
+		local N, M = 0, 0
+		while t <= O do
+			local ch = string.sub(body, t, t)
+			local U = mapK[ch]
+			if U then
+				N = N + U * (64 ^ ((3 - M)))
+				M = M + 1
+				if M == 4 then
+					M = 0
+					local c = math.floor(N / 65536) % 256
+					local u = math.floor(N / 256) % 256
+					local o = N % 256
+					out[#out+1] = string.char(c, u, o)
+					N = 0
+				end
+			elseif ch == "=" then
+				out[#out+1] = string.char(math.floor(N / 65536) % 256)
+				if t >= O or string.sub(body, t + 1, t + 1) ~= "=" then
+					out[#out+1] = string.char(math.floor((N % 65536) / 256) % 256)
+				end
+				break
+			end
+			t = t + 1
+		end
+		local r = table.concat(out)
+		return #r > 0 and r or nil
+	end
+
+	-- Fold simple integer expressions like -601459+601460 or 113623830%714615
+	local function foldExpr(e)
+		e = string.gsub(e, "%s+", "")
+		if not string.match(e, "^[%d%+%-%*%%/()]+$") then return nil end
+		local ok2, f2 = pcall(luau.load, "return (" .. e .. ")", { debugName = "fold" })
+		if not ok2 or type(f2) ~= "function" then return nil end
+		local ok, v = pcall(f2)
+		if ok and type(v) == "number" then return v end
+		return nil
+	end
+
+	local function extractCharMap(src, which)
+		-- Find alphabet table near decode: local O={m=...,["$"]=...} or K={j=...}
+		-- Heuristic: largest { key=number / ["x"]=number } block after "local"
+		local best, bestN = nil, 0
+		for block in string.gmatch(src, "local%s+[%w_]+%s*=%s*(%b{})") do
+			local n = 0
+			local map = {}
+			for k, v in string.gmatch(block, "%[\"([^\"]+)\"%]%s*=%s*([%d%+%-%*%%/()]+)") do
+				local num = foldExpr(v)
+				if num then map[k] = num; n = n + 1 end
+			end
+			for k, v in string.gmatch(block, "([%a_])%s*=%s*([%d%+%-%*%%/()]+)") do
+				local num = foldExpr(v)
+				if num then map[k] = num; n = n + 1 end
+			end
+			if n > bestN then bestN, best = n, map end
+		end
+		return best, bestN
+	end
+
+	if string.find(source, "wearedevs%.net/obfuscator", 1, true) or string.find(source, 'local c={"T', 1, true) then
 		emit("bytecode.const", "wearedevs")
-		emit("bytecode.const", "obfuscator")
+		local arrLit = wrdExtractArray(source)
+		local tokens = arrLit and wrdParseStrings(arrLit) or {}
+		-- extract both maps (O for T, K for m) — take two largest maps
+		local maps = {}
+		for block in string.gmatch(source, "local%s+[%w_]+%s*=%s*(%b{})") do
+			local map, n = {}, 0
+			for k, v in string.gmatch(block, "%[\"([^\"]+)\"%]%s*=%s*([%d%+%-%*%%/()%-]+)") do
+				local num = foldExpr(v)
+				if num then map[k] = num; n = n + 1 end
+			end
+			for k, v in string.gmatch(block, "([%a_])%s*=%s*([%d%+%-%*%%/()%-]+)") do
+				local num = foldExpr(v)
+				if num then map[k] = num; n = n + 1 end
+			end
+			if n >= 20 then maps[#maps+1] = { n = n, map = map } end
+		end
+		table.sort(maps, function(a, b) return a.n > b.n end)
+		local function scorePlain(s)
+			if type(s) ~= "string" or #s < 1 then return -1 end
+			local good = 0
+			for i = 1, #s do
+				local b = string.byte(s, i)
+				if b >= 32 and b < 127 then good = good + 1
+				elseif b == 9 or b == 10 or b == 13 then good = good + 1
+				else good = good - 2 end
+			end
+			return good
+		end
+
+		local function tryDecodeAll(mapT, mapM)
+			local results = {}
+			local score = 0
+			for _, tok in ipairs(tokens) do
+				if #tok >= 2 then
+					local tag = string.sub(tok, 1, 1)
+					local body = string.sub(tok, 2)
+					local plain = nil
+					if tag == "T" then plain = decodeT(body, mapT)
+					elseif tag == "m" then plain = decodeM(body, mapM)
+					end
+					local sc = scorePlain(plain)
+					if sc >= math.max(1, math.floor(#(plain or "") * 0.6)) then
+						results[#results+1] = plain
+						score = score + sc
+					end
+				end
+			end
+			return results, score
+		end
+
+		local m1 = maps[1] and maps[1].map or {}
+		local m2 = maps[2] and maps[2].map or m1
+		local r1, s1 = tryDecodeAll(m1, m2)
+		local r2, s2 = tryDecodeAll(m2, m1)
+		local best = s2 > s1 and r2 or r1
+		local decoded = 0
+		local seen = {}
+		for _, plain in ipairs(best) do
+			if not seen[plain] then
+				seen[plain] = true
+				emit("wearedevs.decoded", plain)
+				decoded = decoded + 1
+				pcall(harvestCode, plain, "wrd")
+			end
+		end
+		-- also emit any high-value leftovers from other order
+		local other = s2 > s1 and r1 or r2
+		for _, plain in ipairs(other) do
+			if not seen[plain] and scorePlain(plain) >= 4 then
+				seen[plain] = true
+				emit("wearedevs.decoded", plain)
+				decoded = decoded + 1
+				pcall(harvestCode, plain, "wrd")
+			end
+		end
+		emit("wearedevs.meta", string.format("tokens=%d decoded=%d maps=%d/%d score=%d/%d", #tokens, decoded, maps[1] and maps[1].n or 0, maps[2] and maps[2].n or 0, s1, s2))
 	end
 end
+
+
 
 
 -- ===== bytecode.const (Luraph / Luau constant & lib.member scan) =====
