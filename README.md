@@ -1,36 +1,27 @@
 # WXZ Dump
 
-Glass UI + video background · VM string dump with thick fake env.
+Glass UI · VM string dump · **one-time dump tickets** · lune bundled (Linux x86_64).
 
-**Lune is bundled** in `bin/lune` (Linux x86_64). Just upload and run.
-
-## Quick start
+## Run
 
 ```bash
-cd wxz-dump
+chmod +x bin/lune
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-chmod +x bin/lune
 python3 server.py
 ```
 
-Open http://127.0.0.1:8765
+- UI: http://127.0.0.1:8765  
+- Health (UptimeRobot): `/health`  
+- Optional: `export WXZ_SECRET=long-random`
 
-Optional: `export PORT=8765` · `export LUNE_BIN=/path/to/other/lune`
+## One-time ticket (anti replay)
 
-## UptimeRobot
+1. Client clicks **Run** → `POST /api/ticket` → `{ ticket, sig, ttl }`
+2. Client `POST /api/dump` with `X-WXZ-Ticket` + `X-WXZ-Sig`
+3. Server **consumes** ticket immediately (IP-bound, ~45s TTL)
+4. Same curl / F12 replay → **401 ticket already used**
 
-HTTP monitor → `https://your-host/health`
+Stops reused API logs from console hooks. Does **not** stop someone using the site live.
 
-## Layout
-
-```
-wxz-dump/
-  bin/lune                 # bundled (Linux x86_64)
-  index.html
-  server.py                # Flask
-  requirements.txt
-  static/bg.mp4
-  tools/string_dump.luau
-  tools/RobloxFidelity.luau
-```
+Also: per-IP rate limits, soft ban, body cap 8MB, security headers.

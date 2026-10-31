@@ -112,9 +112,19 @@
     }
     textarea {
       font-family: var(--mono); font-size: 0.78rem; line-height: 1.55;
-      resize: vertical; min-height: 200px;
+      resize: none;
+      height: 280px;
+      max-height: 280px;
+      overflow-y: auto;
+      overflow-x: auto;
+      white-space: pre;
+      tab-size: 2;
     }
-    textarea.output { min-height: 280px; background: rgba(5,7,10,0.72); }
+    textarea.output {
+      height: 320px;
+      max-height: 320px;
+      background: rgba(5,7,10,0.72);
+    }
 
     .dropzone {
       border: 1.5px dashed var(--border-strong); border-radius: 12px;
@@ -328,8 +338,8 @@
     async function checkServer() {
       try {
         const j = await (await fetch("/health")).json();
-        $("serverBadge").textContent = j.lune ? "● online" : "● no lune";
-        $("serverBadge").classList.toggle("live", !!j.ok && !!j.lune);
+        $("serverBadge").textContent = j.ok ? "● online" : "● down";
+        $("serverBadge").classList.toggle("live", !!j.ok);
       } catch {
         $("serverBadge").textContent = "● offline";
         $("serverBadge").classList.remove("live");
@@ -337,6 +347,15 @@
     }
     checkServer();
     setInterval(checkServer, 30000);
+
+    /** One-time ticket: mint → dump once → server burns it (anti replay / F12 curl reuse). */
+    async function mintTicket() {
+      const r = await fetch("/api/ticket", { method: "POST" });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || ("ticket " + r.status));
+      if (!j.ticket || !j.sig) throw new Error("bad ticket");
+      return j;
+    }
 
     $("runBtn").addEventListener("click", async () => {
       if (state.running) return;
@@ -351,18 +370,31 @@
       setStatus("run", "Running…");
 
       try {
+        const ticket = await mintTicket();
         const fd = new FormData();
-        fd.append("mode", "string_dump");
+        fd.append("ticket", ticket.ticket);
+        fd.append("sig", ticket.sig);
         if (url) fd.append("url", url);
         if (code) fd.append("source", code);
         if (state.file) fd.append("file", state.file);
 
         const t0 = performance.now();
-        const r = await fetch("/api/dump", { method: "POST", body: fd });
-        const j = await r.json();
+        const r = await fetch("/api/dump", {
+          method: "POST",
+          body: fd,
+          headers: {
+            "X-WXZ-Ticket": ticket.ticket,
+            "X-WXZ-Sig": ticket.sig,
+          },
+        });
+        const j = await r.json().catch(() => ({}));
         const ms = ((performance.now() - t0) / 1000).toFixed(2);
         if (j.log) log(j.log);
 
+        if (r.status === 401) {
+          setStatus("err", "ticket expired/used — try again");
+          return;
+        }
         if (!r.ok || j.error) {
           setStatus("err", j.error || ("HTTP " + r.status));
           if (j.output) $("outputCode").value = j.output;

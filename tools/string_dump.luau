@@ -322,6 +322,37 @@ end
 
 pcall(harvestCode, source, "static")
 
+-- WEAREDEVS_STATIC_WXZ: peel encoded string pool (T... / m... tokens)
+do
+	local function wrdDecodeToken(tok)
+		if type(tok) ~= "string" or #tok < 2 then return nil end
+		local tag = string.sub(tok, 1, 1)
+		local body = string.sub(tok, 2)
+		if tag ~= "T" and tag ~= "m" then return nil end
+		-- best-effort: emit raw body + tag for analysis
+		return body
+	end
+	-- collect quoted tokens from leading array
+	local head = string.sub(source, 1, math.min(#source, 120000))
+	for tok in string.gmatch(head, '"([^"]+)"') do
+		if #tok >= 2 and #tok <= 200 then
+			local c0 = string.sub(tok, 1, 1)
+			if c0 == "T" or c0 == "m" then
+				emit("wearedevs.token", tok)
+				local body = wrdDecodeToken(tok)
+				if body and #body >= 1 then
+					emit("wearedevs.body", body)
+				end
+			end
+		end
+	end
+	if string.find(source, "wearedevs%.net/obfuscator", 1, true) or string.find(source, "WeAreDevs", 1, true) then
+		emit("bytecode.const", "wearedevs")
+		emit("bytecode.const", "obfuscator")
+	end
+end
+
+
 -- ===== bytecode.const (Luraph / Luau constant & lib.member scan) =====
 -- Matches AZT-style dumps: library field names + known globals embedded in VM blobs
 do
@@ -1509,6 +1540,56 @@ do
 end
 env.math = math
 env.bit32 = bit32
+
+-- SOFT_ARITH_WXZ: WeAreDevs / heavy VM often does n+nil / nil^n
+do
+	local function softN(v)
+		local t = type(v)
+		if t == "number" then return v end
+		if t == "nil" then return 0 end
+		if t == "boolean" then return v and 1 or 0 end
+		if t == "string" then
+			local n = tonumber(v)
+			return n or 0
+		end
+		return 0
+	end
+	local _add = function(a, b) return softN(a) + softN(b) end
+	local _sub = function(a, b) return softN(a) - softN(b) end
+	local _mul = function(a, b) return softN(a) * softN(b) end
+	local _div = function(a, b)
+		b = softN(b)
+		if b == 0 then return 0 end
+		return softN(a) / b
+	end
+	local _mod = function(a, b)
+		b = softN(b)
+		if b == 0 then return 0 end
+		return softN(a) % b
+	end
+	local _pow = function(a, b)
+		a, b = softN(a), softN(b)
+		if b ~= b or a ~= a then return 0 end -- nan
+		if b > 64 or b < -64 then return 0 end -- avoid huge
+		local ok, r = pcall(function() return a ^ b end)
+		return ok and r or 0
+	end
+	local _unm = function(a) return -softN(a) end
+	-- Wrap number metatable if possible (Lune may not allow)
+	pcall(function()
+		local mt = getmetatable(0)
+		if type(mt) ~= "table" then
+			-- create proxy number helpers used by some VMs via setmetatable tricks
+		end
+	end)
+	env.__soft_add = _add
+	env.__soft_sub = _sub
+	env.__soft_mul = _mul
+	env.__soft_div = _div
+	env.__soft_mod = _mod
+	env.__soft_pow = _pow
+end
+
 
 env.bit = bit32
 -- Virtual clock (V1Dumper-style): task.wait advances guest time + fires "frame" hooks
