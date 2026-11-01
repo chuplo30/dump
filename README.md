@@ -1,12 +1,22 @@
-# WXZ Dump
+# WXZ Dump Bot
 
-Glass UI · VM string dump
+Commands: `.dump` / `.d`
 
-## Run
+## Input
+- Attachment (`.lua` / `.txt`)
+- Raw URL (pastebin / github raw / pastefy / …) — browser headers
+- Code block
 
-```bash
-chmod +x bin/lune
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python3 server.py
+## Output
+- Reply file: **`message.txt`**
+- Text: `skidding lol 😂`
+- Banner: `-- This file was generated with xz at discord.gg/tqmaYsxGKm v0.1 --`
+- Status: **Online** · Watching `.dump | .d`
+
+## Render
 ```
+DISCORD_TOKEN=<token>
+Build: pip install -r requirements.txt
+Start: python3 bot.py
+```
+Enable **Message Content Intent**.
