@@ -29,6 +29,7 @@ WORK = ROOT / "work"
 WORK.mkdir(parents=True, exist_ok=True)
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "1219951796982648913"))
 MAX_SOURCE = 8 * 1024 * 1024
 DUMP_TIMEOUT = int(os.environ.get("DUMP_TIMEOUT", "150"))
 FETCH_TIMEOUT = int(os.environ.get("FETCH_TIMEOUT", "25"))
@@ -280,13 +281,27 @@ def health():
 
 
 def wrd_obfuscate(script: str) -> str:
-    """Call WeAreDevs obfuscator API. Returns obfuscated source or raises."""
+    """Call WeAreDevs obfuscator API with browser headers + session cookies."""
     import json
     url = "https://wearedevs.net/api/obfuscate"
-    payload = json.dumps({"script": script}).encode("utf-8")
+    payload = json.dumps({"script": script}, ensure_ascii=False).encode("utf-8")
+    # cookies: env WRD_COOKIE overrides, else WRD_SID + WRD_SEC2, else built-in defaults
+    cookie = (os.environ.get("WRD_COOKIE") or "").strip()
+    if not cookie:
+        sid = (os.environ.get("WRD_SID") or (
+            "eyJlbmMiOiJBMjU2R0NNIiwiYWxnIjoiZGlyIn0..LGOVIUE2iAwn3UDY."
+            "w1g5EYWZm2Gj_bALBZRyhu7fxl_05L9x5xMD_46smm0_wwESQkr4l88RzAJsnETDxyFpidPCZBUnY8SHq3cPrphYu37OonnC6LqNVyKTRNvLaNr2DcvWvKQ94EHjE7QtqyapAQ."
+            "ewFwZYjN-YXICPKEklDnng"
+        )).strip()
+        sec = (os.environ.get("WRD_SEC2") or (
+            "eyJlbmMiOiJBMjU2R0NNIiwiYWxnIjoiZGlyIn0..eUG99c64FOyUTZDG."
+            "HYI0aeTs7Cg6XLyLkSxqLvArfV_iIXCdkNyj8gFI_lrxnFm0NE010xb-1sI3WJWJ6KqleHK8pBl0DpEFaRy5oe9O4ZItG_cRIW5o1Q2un3cfWEK9PKPMAbZhDgyFi6AEt1BCnA."
+            "RlkNmEEXYTtyDeJLB-xUZQ"
+        )).strip()
+        cookie = f"sid={sid}; _WRDSec2={sec}"
     headers = {
         "accept": "*/*",
-        "accept-language": "vi-VN,vi;q=0.9,en-US;q=0.6,en;q=0.5",
+        "accept-language": "vi-VN,vi;q=0.9,fr-FR;q=0.8,fr;q=0.7,en-US;q=0.6,en;q=0.5",
         "content-type": "application/json",
         "origin": "https://wearedevs.net",
         "referer": "https://wearedevs.net/obfuscator",
@@ -295,18 +310,17 @@ def wrd_obfuscate(script: str) -> str:
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/155.0.0.0 Mobile Safari/537.36"
         ),
+        "cookie": cookie,
     }
-    # optional session cookies from env (expire often)
-    cookie = os.environ.get("WRD_COOKIE", "").strip()
-    if cookie:
-        headers["cookie"] = cookie
     req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=90) as resp:
             body = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as ex:
+        log("[wrd] HTTP", ex.code)
         raise RuntimeError("error") from ex
     except Exception as ex:
+        log("[wrd] fail", ex)
         raise RuntimeError("error") from ex
     try:
         data = json.loads(body)
@@ -315,17 +329,30 @@ def wrd_obfuscate(script: str) -> str:
     if not isinstance(data, dict) or not data.get("success"):
         raise RuntimeError("error")
     out = data.get("obfuscated") or data.get("result") or data.get("code")
-    if not out or not isinstance(out, str):
+    if not out or not isinstance(out, str) or not out.strip():
         raise RuntimeError("error")
     return out
+
+
+
+def allow_context(ctx) -> bool:
+    """Block DMs for everyone except admin."""
+    try:
+        if ctx.guild is None and ctx.author.id != ADMIN_ID:
+            return False
+    except Exception:
+        return False
+    return True
 
 def format_user_error(ex) -> str:
     err = sanitize_public_error(ex)
     if "url / file" in err:
         return "url / file or send a code block"
-    if err.strip().lower() == "error":
-        return "error"
-    return "dump failed:\n```\n" + err + "\n```"
+    if err.strip().lower() in {"error", "empty dump output"}:
+        return err.strip().lower() if err.strip().lower() == "empty dump output" else "error"
+    if "empty dump" in err.lower():
+        return "empty dump output"
+    return err.strip() or "error"
 
 def start_flask():
     port = int(os.environ.get("PORT", "10000") or "10000")
@@ -376,6 +403,8 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
 async def do_dump(ctx: commands.Context, *, silent: bool):
     """silent=True (.get) → file only, no caption / no status text left."""
     if ctx.author.bot:
+        return
+    if not allow_context(ctx):
         return
 
     status_msg = None
@@ -446,6 +475,8 @@ async def cmd_get(ctx: commands.Context):
     """Fetch URL / attachment → message.txt (no dump)."""
     if ctx.author.bot:
         return
+    if not allow_context(ctx):
+        return
     try:
         content = ctx.message.content or ""
         urls = URL_RE.findall(content)
@@ -502,7 +533,9 @@ async def cmd_wrd(ctx: commands.Context):
     """WeAreDevs obfuscator API → message.txt"""
     if ctx.author.bot:
         return
-    status = await ctx.reply("cooking…", mention_author=False)
+    if not allow_context(ctx):
+        return
+    status = await ctx.reply("obfuscate...", mention_author=False)
     try:
         source = await extract_source(ctx.message)
         if not source or not str(source).strip():
