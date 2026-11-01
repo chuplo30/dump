@@ -24,7 +24,7 @@ do
 		if not fs.isFile(path) then return nil end
 		local okR, src = pcall(fs.readFile, path)
 		if not okR or type(src) ~= "string" or #src < 100 then return nil end
-		local okL, chunk = pcall(luau.load, src, { debugName = "RobloxFidelity" })
+		local okL, chunk = pcall(luau.load, src, { debugName = "rf" })
 		if not okL or type(chunk) ~= "function" then return nil end
 		local okC, mod = pcall(chunk)
 		if okC and type(mod) == "table" and mod.ToFloat32 ~= nil then
@@ -100,12 +100,12 @@ local function tagFor(s)
 	return "CONST"
 end
 
+local emitIndex = 0
 local function emit(src, s)
 	if not interesting(s) then return end
 	if s == "Player" or s == "LocalPlayer" or s == "nil" then return end
 	if src == "prop:Name" and (s == "Player" or s == "Workspace" or s == "game") then return end
 	local flat = string.gsub(s, "[\r\n]+", "\\n")
-	-- keep binary visible as escapes if needed
 	if string.match(flat, "[%z\1-\8\11\12\14-\31]") then
 		flat = (string.gsub(flat, ".", function(c)
 			local b = string.byte(c)
@@ -113,11 +113,12 @@ local function emit(src, s)
 			return c
 		end))
 	end
-	if #flat > 300 then flat = string.sub(flat, 1, 300) .. "…" end
-	local key = src .. "|" .. flat
+	if #flat > 8000 then flat = string.sub(flat, 1, 8000) .. "…" end
+	local key = flat
 	if seen[key] then return end
 	seen[key] = true
-	lines[#lines + 1] = string.format('[%s] (%s) "%s"', tagFor(s), src, flat)
+	emitIndex += 1
+	lines[#lines + 1] = string.format("[%d] = %s", emitIndex, flat)
 end
 
 
@@ -476,7 +477,7 @@ do
 	local function foldExpr(e)
 		e = string.gsub(e, "%s+", "")
 		if not string.match(e, "^[%d%+%-%*%%/()]+$") then return nil end
-		local ok2, f2 = pcall(luau.load, "return (" .. e .. ")", { debugName = "fold" })
+		local ok2, f2 = pcall(luau.load, "return (" .. e .. ")", { debugName = "f" })
 		if not ok2 or type(f2) ~= "function" then return nil end
 		local ok, v = pcall(f2)
 		if ok and type(v) == "number" then return v end
@@ -2057,7 +2058,7 @@ do
 		end
 		local src = tostring(code or "")
 		local ok, fn = pcall(luau.load, src, {
-			debugName = "loadstring",
+			debugName = "ls",
 			environment = env,
 		})
 		if not ok or type(fn) ~= "function" then
@@ -2266,12 +2267,12 @@ _G._G = env
 -- Prefer environment table (Lune); fallback preamble for older Lune
 local loadOk, chunk
 do
-	local ok1, c1 = pcall(luau.load, source, { debugName = "string_dump", environment = env })
+	local ok1, c1 = pcall(luau.load, source, { debugName = "chunk", environment = env })
 	if ok1 and type(c1) == "function" then
 		loadOk, chunk = true, c1
 	else
 		local preamble = "local " .. table.concat(envKeys, ",") .. " = ...\n"
-		loadOk, chunk = pcall(luau.load, preamble .. source, { debugName = "string_dump" })
+		loadOk, chunk = pcall(luau.load, preamble .. source, { debugName = "chunk" })
 		if loadOk and type(chunk) == "function" then
 			local inner = chunk
 			chunk = function()
@@ -2281,7 +2282,7 @@ do
 	end
 end
 if not loadOk then
-	lines[#lines + 1] = "[ERROR] load: " .. tostring(chunk):sub(1, 200)
+	lines[#lines + 1] = "[ERROR] load failed"
 else
 	-- Always run; Luraph hits budget via buffer/bit32/task.wait hooks (Lune has no debug.sethook)
 	local isLuraphSrc = string.find(source, "Luraph", 1, true) or string.find(source, "lura.ph", 1, true)
@@ -2292,10 +2293,9 @@ else
 	flushChar()
 	flushUtf8()
 	if not runOk and type(runErr) == "string" then
-		if string.find(runErr, "budget", 1, true) then
-			lines[#lines + 1] = "[NOTE] runtime budget reached (partial VM string dump)"
-		else
-			lines[#lines + 1] = "[NOTE] runtime stopped: " .. string.sub(runErr, 1, 140)
+		if not string.find(runErr, "budget", 1, true) then
+			-- never leak host paths / C frames / engine names
+			lines[#lines + 1] = "[NOTE] runtime stopped"
 		end
 	end
 	-- Phase 2: deep re-harvest every loadstring-src already captured + try small nested runs
@@ -2323,7 +2323,7 @@ else
 			if os.clock() - t0 > 8 then break end
 			local code = collected[i]
 			if #code < 8000 and not string.find(code, "while true", 1, true) then
-				local okf, fn = pcall(luau.load, code, { debugName = "p2", environment = env })
+				local okf, fn = pcall(luau.load, code, { debugName = "c2", environment = env })
 				if okf and type(fn) == "function" then
 					pcall(fn)
 					flushChar()
@@ -2336,6 +2336,6 @@ end
 
 local out = table.concat(lines, "\n")
 if #out == 0 then out = "[NOTE] no constants captured" end
-out ..= string.format("\n\n-- dumped %d entries in %.2fs\n", #lines, os.clock() - started)
+out ..= string.format("\n\n-- %d strings\n", emitIndex)
 if outputPath then fs.writeFile(outputPath, out) end
 print(out)

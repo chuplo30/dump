@@ -1,22 +1,21 @@
 # WXZ Dump Bot
 
-Commands: `.dump` / `.d`
+Commands (only these 3 — anything else is ignored):
+- `.dump` / `.d` → dump + reply `message.txt` + `skidding lol 😂`
+- `.get` → dump + reply `message.txt` **only** (no caption)
 
-## Input
-- Attachment (`.lua` / `.txt`)
-- Raw URL (pastebin / github raw / pastefy / …) — browser headers
-- Code block
-
-## Output
-- Reply file: **`message.txt`**
-- Text: `skidding lol 😂`
-- Banner: `-- This file was generated with xz at discord.gg/tqmaYsxGKm v0.1 --`
-- Status: **Online** · Watching `.dump | .d`
+Output lines:
+```
+[1] = setfpscap
+[2] = HttpGet
+```
 
 ## Render
 ```
-DISCORD_TOKEN=<token>
+DISCORD_TOKEN=...
 Build: pip install -r requirements.txt
 Start: python3 bot.py
 ```
-Enable **Message Content Intent**.
+UptimeRobot → `https://YOUR-SERVICE.onrender.com/health` every 5 min.
+
+Message Content Intent ON.

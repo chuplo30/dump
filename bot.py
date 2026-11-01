@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WXZ Dump Discord bot — .dump / .d — Lune string dump on Render."""
+"""WXZ Dump Discord bot — .dump / .d / .get — Lune dump on Render + Flask health."""
 from __future__ import annotations
 
 import asyncio
@@ -15,11 +15,11 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import discord
 from discord.ext import commands
+from flask import Flask, jsonify
 
 ROOT = Path(__file__).resolve().parent
 TOOLS = ROOT / "tools"
@@ -39,7 +39,6 @@ LUNE_URL = os.environ.get(
     "https://github.com/lune-org/lune/releases/download/v0.10.4/lune-0.10.4-linux-x86_64.zip",
 )
 
-# Browser-like headers — many raw hosts (pastebin, github raw, pastefy, …) reject bare clients
 FETCH_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -59,8 +58,23 @@ def log(*a):
     print(*a, flush=True)
 
 
+def sanitize_public_error(msg: str) -> str:
+    """Never leak host paths, engine filenames, or C stack frames to Discord."""
+    msg = str(msg or "")
+    msg = re.sub(r"/[\w.\-:/\\]+", "", msg)
+    msg = re.sub(r"[A-Za-z]:\\[\w.\\/]+", "", msg)
+    msg = re.sub(r"\[string \"[^\"]*\"\]", "", msg)
+    msg = re.sub(r"\[C\]:[^\n]*", "", msg)
+    msg = re.sub(r"tools/[\w.\-]+", "", msg)
+    msg = re.sub(r"dump\.luau|string_dump|RobloxFidelity", "", msg, flags=re.I)
+    msg = re.sub(r"/opt/render[^\s]*", "", msg)
+    msg = re.sub(r"\s+", " ", msg).strip(" :-\n")
+    if not msg:
+        return "dump failed"
+    return msg[:300]
+
+
 def ensure_lune() -> str:
-    """Return path to lune binary; download if missing."""
     candidates = [
         os.environ.get("LUNE_BIN"),
         str(BIN / "lune"),
@@ -79,10 +93,12 @@ def ensure_lune() -> str:
             p.chmod(p.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         except OSError:
             pass
-        # verify actually executable (noexec mounts fail here)
         try:
-            r = subprocess.run([str(p), "--version"], capture_output=True, text=True, timeout=10)
-            if r.returncode == 0 or "lune" in ((r.stdout or "") + (r.stderr or "")).lower():
+            r = subprocess.run(
+                [str(p), "--version"], capture_output=True, text=True, timeout=10
+            )
+            blob = ((r.stdout or "") + (r.stderr or "")).lower()
+            if r.returncode == 0 or "lune" in blob:
                 return str(p)
         except (OSError, subprocess.TimeoutExpired):
             continue
@@ -96,13 +112,10 @@ def ensure_lune() -> str:
             zpath.write_bytes(resp.read())
         with zipfile.ZipFile(zpath, "r") as zf:
             names = zf.namelist()
-            target = None
-            for n in names:
-                if Path(n).name == "lune" or Path(n).name.startswith("lune"):
-                    target = n
-                    break
-            if not target:
-                target = names[0]
+            target = next(
+                (n for n in names if Path(n).name == "lune" or Path(n).name.startswith("lune")),
+                names[0],
+            )
             out = BIN / "lune"
             out.write_bytes(zf.read(target))
             out.chmod(0o755)
@@ -110,19 +123,14 @@ def ensure_lune() -> str:
         log("[lune] installed →", out)
         return str(out)
     except Exception as ex:
-        log("[lune] download failed:", ex)
-        raise RuntimeError(
-            "lune binary missing — put bin/lune in repo or set LUNE_BIN / LUNE_URL"
-        ) from ex
+        raise RuntimeError("lune binary missing") from ex
 
 
 def fetch_url(url: str) -> str:
-    """GET raw script URL with browser-like headers."""
     url = url.strip()
     if not re.match(r"^https?://", url, re.I):
         raise RuntimeError("url must start with http:// or https://")
 
-    # normalize common paste hosts to raw when user pastes view URLs
     raw = url
     if "pastebin.com/" in url and "/raw/" not in url:
         raw = re.sub(
@@ -137,25 +145,17 @@ def fetch_url(url: str) -> str:
         raw = url.rstrip("/") + "/raw"
 
     headers = dict(FETCH_HEADERS)
-    # github / gist prefer raw
     if "github.com" in raw and "/blob/" in raw:
         raw = raw.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
-    if "gist.github.com" in raw and "/raw" not in raw:
-        headers["Accept"] = "text/plain"
 
     req = urllib.request.Request(raw, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as resp:
             data = resp.read()
     except urllib.error.HTTPError as ex:
-        body = ""
-        try:
-            body = ex.read()[:200].decode("utf-8", errors="replace")
-        except Exception:
-            pass
-        raise RuntimeError(f"fetch HTTP {ex.code}: {body or ex.reason}") from ex
+        raise RuntimeError(f"fetch HTTP {ex.code}") from ex
     except urllib.error.URLError as ex:
-        raise RuntimeError(f"fetch failed: {ex.reason}") from ex
+        raise RuntimeError("fetch failed") from ex
 
     if len(data) > MAX_SOURCE:
         raise RuntimeError("remote file too large")
@@ -165,10 +165,9 @@ def fetch_url(url: str) -> str:
     return text
 
 
-def run_dump(source: str) -> tuple[str, str]:
-    """Run tools/dump.luau; returns (output_text, log_text)."""
+def run_dump(source: str) -> str:
     if not DUMP_ENGINE.is_file():
-        raise RuntimeError("tools/dump.luau missing")
+        raise RuntimeError("engine missing")
 
     lune = ensure_lune()
     job = f"{int(time.time() * 1000) % 10_000_000:07d}"
@@ -191,12 +190,9 @@ def run_dump(source: str) -> tuple[str, str]:
         )
     except subprocess.TimeoutExpired as ex:
         raise RuntimeError(f"dump timeout ({DUMP_TIMEOUT}s)") from ex
-    finally:
-        elapsed = time.time() - t0
+    elapsed = time.time() - t0
 
-    stdout = (proc.stdout or "")[-8000:]
-    stderr = (proc.stderr or "")[-2000:]
-    log_txt = (stdout + ("\n" + stderr if stderr else "")).strip()
+    stdout = (proc.stdout or "")
     output = ""
     if out_path.is_file():
         output = out_path.read_text(encoding="utf-8", errors="replace")
@@ -209,16 +205,25 @@ def run_dump(source: str) -> tuple[str, str]:
         except OSError:
             pass
 
+    # strip any accidental path leaks from engine stdout
+    clean_lines = []
+    for line in (output or "").splitlines():
+        if re.search(r"/opt/render|tools/dump|/home/|/Users/", line):
+            if line.strip().startswith("[NOTE]"):
+                clean_lines.append("[NOTE] runtime stopped")
+            continue
+        if "[C]:" in line and "function" in line:
+            continue
+        clean_lines.append(line)
+    output = "\n".join(clean_lines).strip()
+
     if not output.strip():
-        raise RuntimeError(
-            "empty dump output"
-            + (f"\n--- log ---\n{log_txt[-1500:]}" if log_txt else "")
-        )
+        raise RuntimeError("empty dump output")
 
     if not output.lstrip().startswith(BANNER.strip()):
         output = BANNER + "\n" + output
-    log(f"[dump] done in {elapsed:.2f}s  out={len(output)}b  code={proc.returncode}")
-    return output, log_txt
+    log(f"[dump] {elapsed:.2f}s out={len(output)}b code={proc.returncode}")
+    return output
 
 
 CODEBLOCK_RE = re.compile(
@@ -229,21 +234,17 @@ URL_RE = re.compile(r"https?://[^\s<>\"')\]]+", re.I)
 
 
 async def extract_source(message: discord.Message) -> str:
-    """Attachment → URL in message → code block → raw text after command."""
     for att in message.attachments:
         if att.size and att.size > MAX_SOURCE:
-            raise RuntimeError(f"file too large ({att.size} > {MAX_SOURCE})")
+            raise RuntimeError("file too large")
         data = await att.read()
         if len(data) > MAX_SOURCE:
             raise RuntimeError("file too large")
         return data.decode("utf-8", errors="replace")
 
     content = message.content or ""
-
-    # URL anywhere in message (prefer after command)
     urls = URL_RE.findall(content)
     if urls:
-        # skip discord CDN attachment urls if any weirdness — still ok to fetch
         url = urls[0].rstrip(".,;>")
         log("[fetch]", url)
         return await asyncio.to_thread(fetch_url, url)
@@ -255,7 +256,7 @@ async def extract_source(message: discord.Message) -> str:
     lines = content.split("\n")
     if lines:
         first = re.sub(
-            r"^[.\s]*(?:dump|d)\b", "", lines[0], count=1, flags=re.I
+            r"^[.\s]*(?:dump|d|get)\b", "", lines[0], count=1, flags=re.I
         ).strip()
         rest = "\n".join([first] + lines[1:]) if first else "\n".join(lines[1:])
     else:
@@ -266,32 +267,20 @@ async def extract_source(message: discord.Message) -> str:
     raise RuntimeError("attach a file, paste a raw URL, or send a code block")
 
 
-def start_health_server():
-    port = int(os.environ.get("PORT", "0") or "0")
-    if port <= 0:
-        return
+# --- Flask keep-alive (UptimeRobot → GET /health) ---
+flask_app = Flask(__name__)
 
-    class H(BaseHTTPRequestHandler):
-        def do_GET(self):
-            body = b'{"ok":true,"service":"wxz-dump-bot"}'
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
 
-        def log_message(self, *args):
-            return
+@flask_app.get("/")
+@flask_app.get("/health")
+def health():
+    return jsonify({"ok": True, "service": "wxz-dump-bot"})
 
-    def run():
-        try:
-            httpd = HTTPServer(("0.0.0.0", port), H)
-            log(f"[health] :{port}")
-            httpd.serve_forever()
-        except Exception as ex:
-            log("[health] failed:", ex)
 
-    threading.Thread(target=run, daemon=True).start()
+def start_flask():
+    port = int(os.environ.get("PORT", "10000") or "10000")
+    log(f"[flask] health on 0.0.0.0:{port}")
+    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 
 intents = discord.Intents.default()
@@ -307,83 +296,110 @@ async def on_ready():
             status=discord.Status.online,
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
-                name=".dump | .d",
+                name=".dump | .d | .get",
             ),
         )
-        log("[bot] presence online")
     except Exception as ex:
-        log("[bot] presence failed:", ex)
+        log("[bot] presence:", ex)
     try:
         ensure_lune()
         log("[bot] lune ok")
     except Exception as ex:
-        log("[bot] lune warn:", ex)
+        log("[bot] lune warn:", sanitize_public_error(ex))
 
 
-async def do_dump(ctx: commands.Context):
+@bot.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    # only 3 commands — ignore everything else silently (no .help)
+    if isinstance(error, commands.CommandNotFound):
+        return
+    if isinstance(error, commands.CommandInvokeError):
+        err = sanitize_public_error(error.original)
+    else:
+        err = sanitize_public_error(error)
+    try:
+        await ctx.reply(f"dump failed:\n```\n{err}\n```", mention_author=False)
+    except discord.HTTPException:
+        pass
+
+
+async def do_dump(ctx: commands.Context, *, silent: bool):
+    """silent=True (.get) → file only, no caption / no status text left."""
     if ctx.author.bot:
         return
-    status = await ctx.reply("dumping…", mention_author=False)
+
+    status_msg = None
+    if not silent:
+        status_msg = await ctx.reply("dumping…", mention_author=False)
+
     try:
         source = await extract_source(ctx.message)
         if not source or not str(source).strip():
-            await status.edit(content="empty source.")
-            return
+            raise RuntimeError("empty source")
         if len(source) > MAX_SOURCE:
-            await status.edit(content="source too large.")
-            return
+            raise RuntimeError("source too large")
 
-        output, _log = await asyncio.to_thread(run_dump, source)
+        output = await asyncio.to_thread(run_dump, source)
 
         tmp = tempfile.NamedTemporaryFile(
-            prefix="wxz_dump_",
-            suffix=".txt",
-            delete=False,
+            prefix="wxz_", suffix=".txt", delete=False
         )
         try:
             tmp.write(output.encode("utf-8", errors="replace"))
             tmp.close()
             file = discord.File(tmp.name, filename="message.txt")
-            await ctx.reply(
-                content="skidding lol 😂",
-                file=file,
-                mention_author=False,
-            )
-            try:
-                await status.delete()
-            except discord.HTTPException:
-                await status.edit(content="done.")
+            if silent:
+                await ctx.reply(file=file, mention_author=False)
+            else:
+                await ctx.reply(
+                    content="skidding lol 😂",
+                    file=file,
+                    mention_author=False,
+                )
+            if status_msg:
+                try:
+                    await status_msg.delete()
+                except discord.HTTPException:
+                    pass
         finally:
             try:
                 os.unlink(tmp.name)
             except OSError:
                 pass
     except Exception as ex:
-        msg = str(ex)
-        if len(msg) > 1800:
-            msg = msg[:1800] + "…"
-        await status.edit(content=f"dump failed:\n```\n{msg}\n```")
+        err = sanitize_public_error(ex)
+        if status_msg:
+            await status_msg.edit(content=f"dump failed:\n```\n{err}\n```")
+        else:
+            # .get still needs a minimal error signal
+            await ctx.reply(f"dump failed:\n```\n{err}\n```", mention_author=False)
 
 
 @bot.command(name="dump")
 async def cmd_dump(ctx: commands.Context):
-    await do_dump(ctx)
+    await do_dump(ctx, silent=False)
 
 
 @bot.command(name="d")
 async def cmd_d(ctx: commands.Context):
-    await do_dump(ctx)
+    await do_dump(ctx, silent=False)
+
+
+@bot.command(name="get")
+async def cmd_get(ctx: commands.Context):
+    """Same dump, file only — no chat caption."""
+    await do_dump(ctx, silent=True)
 
 
 def main():
     if not TOKEN:
-        log("ERROR: set DISCORD_TOKEN env var")
+        log("ERROR: set DISCORD_TOKEN")
         sys.exit(1)
     if not DUMP_ENGINE.is_file():
-        log("ERROR: missing", DUMP_ENGINE)
+        log("ERROR: engine missing")
         sys.exit(1)
 
-    start_health_server()
+    threading.Thread(target=start_flask, daemon=True).start()
     log("[bot] starting…")
     bot.run(TOKEN, log_handler=None)
 
