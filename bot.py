@@ -257,7 +257,7 @@ async def extract_source(message: discord.Message) -> str:
     lines = content.split("\n")
     if lines:
         first = re.sub(
-            r"^[.\s]*(?:dump|d|get)\b", "", lines[0], count=1, flags=re.I
+            r"^[.\s]*(?:dump|d|get|wrd)\b", "", lines[0], count=1, flags=re.I
         ).strip()
         rest = "\n".join([first] + lines[1:]) if first else "\n".join(lines[1:])
     else:
@@ -284,6 +284,11 @@ def wrd_obfuscate(script: str) -> str:
     """Call WeAreDevs obfuscator API. Retries once on 429."""
     import json
     import time as _time
+    script = (script or "").strip()
+    # strip accidental command prefix if extract_source missed it
+    script = re.sub(r"^[.\s]*(?:wrd|dump|d|get)\b\s*", "", script, count=1, flags=re.I).strip()
+    if not script:
+        raise RuntimeError("url / file or send a code block")
     url = "https://wearedevs.net/api/obfuscate"
     payload = json.dumps({"script": script}, ensure_ascii=False).encode("utf-8")
     cookie = (os.environ.get("WRD_COOKIE") or "").strip()
@@ -336,6 +341,9 @@ def wrd_obfuscate(script: str) -> str:
             if code in (401, 403):
                 last_err = "cookie expired"
                 break
+            if code == 400:
+                last_err = "bad script"
+                break
             last_err = "error"
             break
         except Exception as ex:
@@ -360,7 +368,9 @@ def format_user_error(ex) -> str:
     low = err.strip().lower()
     if "url / file" in low:
         return "url / file or send a code block"
-    if low in {"error", "empty dump output", "rate limit", "cookie expired"}:
+    if "file or send a code block" in low:
+        return "file or send a code block"
+    if low in {"error", "empty dump output", "rate limit", "cookie expired", "bad script"}:
         return low
     if "empty dump" in low:
         return "empty dump output"
@@ -514,7 +524,7 @@ async def cmd_get(ctx: commands.Context):
         else:
             lines = content.split("\n")
             first = (
-                re.sub(r"^[.\s]*get\b", "", lines[0], count=1, flags=re.I).strip()
+                re.sub(r"^[.\s]*(?:get|wrd)\b", "", lines[0], count=1, flags=re.I).strip()
                 if lines
                 else ""
             )
@@ -546,16 +556,16 @@ async def cmd_get(ctx: commands.Context):
 
 @bot.command(name="wrd")
 async def cmd_wrd(ctx: commands.Context):
-    """WeAreDevs obfuscator API → message.txt"""
+    """WeAreDevs obfuscator API → message.txt (code or file only, no URL)."""
     if ctx.author.bot:
         return
     if not allow_context(ctx):
         return
     status = await ctx.reply("obfuscate...", mention_author=False)
     try:
-        source = await extract_source(ctx.message)
+        source = await extract_source_wrd(ctx.message)
         if not source or not str(source).strip():
-            raise RuntimeError("url / file or send a code block")
+            raise RuntimeError("file or send a code block")
         if len(source) > MAX_SOURCE:
             raise RuntimeError("file too large")
         obf = await asyncio.to_thread(wrd_obfuscate, source)
