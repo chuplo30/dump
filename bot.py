@@ -281,11 +281,11 @@ def health():
 
 
 def wrd_obfuscate(script: str) -> str:
-    """Call WeAreDevs obfuscator API with browser headers + session cookies."""
+    """Call WeAreDevs obfuscator API. Retries once on 429."""
     import json
+    import time as _time
     url = "https://wearedevs.net/api/obfuscate"
     payload = json.dumps({"script": script}, ensure_ascii=False).encode("utf-8")
-    # cookies: env WRD_COOKIE overrides, else WRD_SID + WRD_SEC2, else built-in defaults
     cookie = (os.environ.get("WRD_COOKIE") or "").strip()
     if not cookie:
         sid = (os.environ.get("WRD_SID") or (
@@ -312,26 +312,37 @@ def wrd_obfuscate(script: str) -> str:
         ),
         "cookie": cookie,
     }
-    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=90) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as ex:
-        log("[wrd] HTTP", ex.code)
-        raise RuntimeError("error") from ex
-    except Exception as ex:
-        log("[wrd] fail", ex)
-        raise RuntimeError("error") from ex
-    try:
-        data = json.loads(body)
-    except Exception as ex:
-        raise RuntimeError("error") from ex
-    if not isinstance(data, dict) or not data.get("success"):
-        raise RuntimeError("error")
-    out = data.get("obfuscated") or data.get("result") or data.get("code")
-    if not out or not isinstance(out, str) or not out.strip():
-        raise RuntimeError("error")
-    return out
+
+    last_err = "error"
+    for attempt in range(3):
+        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+            data = json.loads(body)
+            if isinstance(data, dict) and data.get("success"):
+                out = data.get("obfuscated") or data.get("result") or data.get("code")
+                if isinstance(out, str) and out.strip():
+                    return out
+            last_err = "error"
+            break
+        except urllib.error.HTTPError as ex:
+            code = getattr(ex, "code", 0) or 0
+            log("[wrd] HTTP", code, "attempt", attempt + 1)
+            if code == 429:
+                last_err = "rate limit"
+                _time.sleep(2.5 * (attempt + 1))
+                continue
+            if code in (401, 403):
+                last_err = "cookie expired"
+                break
+            last_err = "error"
+            break
+        except Exception as ex:
+            log("[wrd] fail", ex)
+            last_err = "error"
+            break
+    raise RuntimeError(last_err)
 
 
 
@@ -346,12 +357,17 @@ def allow_context(ctx) -> bool:
 
 def format_user_error(ex) -> str:
     err = sanitize_public_error(ex)
-    if "url / file" in err:
+    low = err.strip().lower()
+    if "url / file" in low:
         return "url / file or send a code block"
-    if err.strip().lower() in {"error", "empty dump output"}:
-        return err.strip().lower() if err.strip().lower() == "empty dump output" else "error"
-    if "empty dump" in err.lower():
+    if low in {"error", "empty dump output", "rate limit", "cookie expired"}:
+        return low
+    if "empty dump" in low:
         return "empty dump output"
+    if "429" in low or "rate" in low:
+        return "rate limit"
+    if "403" in low or "401" in low or "cookie" in low:
+        return "cookie expired"
     return err.strip() or "error"
 
 def start_flask():
