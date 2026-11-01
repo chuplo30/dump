@@ -264,7 +264,7 @@ async def extract_source(message: discord.Message) -> str:
     rest = rest.strip()
     if rest:
         return rest
-    raise RuntimeError("attach a file, paste a raw URL, or send a code block")
+    raise RuntimeError("attach a file/URL or send a code block")
 
 
 # --- Flask keep-alive (UptimeRobot → GET /health) ---
@@ -296,7 +296,7 @@ async def on_ready():
             status=discord.Status.online,
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
-                name=".dump | .d | .get",
+                name=".d",
             ),
         )
     except Exception as ex:
@@ -318,7 +318,7 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
     else:
         err = sanitize_public_error(error)
     try:
-        await ctx.reply(f"dump failed:\n```\n{err}\n```", mention_author=False)
+        await ctx.reply(f"dump failed: {err}", mention_author=False)
     except discord.HTTPException:
         pass
 
@@ -387,8 +387,51 @@ async def cmd_d(ctx: commands.Context):
 
 @bot.command(name="get")
 async def cmd_get(ctx: commands.Context):
-    """Same dump, file only — no chat caption."""
-    await do_dump(ctx, silent=True)
+    """Download / fetch URL (or attachment) → message.txt — NO dump."""
+    if ctx.author.bot:
+        return
+    try:
+        content = ctx.message.content or ""
+        urls = URL_RE.findall(content)
+        data = None
+        name = "message.txt"
+
+        if ctx.message.attachments:
+            att = ctx.message.attachments[0]
+            if att.size and att.size > MAX_SOURCE:
+                raise RuntimeError("file too large")
+            raw = await att.read()
+            if len(raw) > MAX_SOURCE:
+                raise RuntimeError("file too large")
+            data = raw
+            name = att.filename or "message.txt"
+        elif urls:
+            url = urls[0].rstrip(".,;>")
+            log("[get]", url)
+            text = await asyncio.to_thread(fetch_url, url)
+            data = text.encode("utf-8", errors="replace")
+        else:
+            # raw text after .get
+            lines = content.split("\n")
+            first = re.sub(r"^[.\s]*get\b", "", lines[0], count=1, flags=re.I).strip() if lines else ""
+            rest = "\n".join([first] + lines[1:]) if first else "\n".join(lines[1:] if lines else [])
+            rest = rest.strip()
+            if not rest:
+                raise RuntimeError("usage: .get <url>  or attach a file")
+            data = rest.encode("utf-8", errors="replace")
+
+        tmp = tempfile.NamedTemporaryFile(prefix="wxz_get_", suffix=".txt", delete=False)
+        try:
+            tmp.write(data)
+            tmp.close()
+            await ctx.reply(file=discord.File(tmp.name, filename="message.txt"), mention_author=False)
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+    except Exception as ex:
+        await ctx.reply(f"get failed:\n```\n{sanitize_public_error(ex)}\n```", mention_author=False)
 
 
 def main():

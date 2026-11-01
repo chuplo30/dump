@@ -118,6 +118,8 @@ local function emit(src, s)
 	if seen[key] then return end
 	seen[key] = true
 	emitIndex += 1
+	if string.find(flat, "attempt to perform arithmetic", 1, true) then return end
+	if string.find(flat, "[string ", 1, true) then return end
 	lines[#lines + 1] = string.format("[%d] = %s", emitIndex, flat)
 end
 
@@ -412,7 +414,8 @@ do
 				if c < U then
 					local ch = string.sub(body, t + c, t + c)
 					Wch = mapO[ch]
-					if not Wch then ok = false break end
+					if type(Wch) == "string" then Wch = tonumber(Wch) end
+					if type(Wch) ~= "number" then ok = false break end
 				else
 					Wch = 84 -- padding sentinel used in VM
 				end
@@ -440,30 +443,37 @@ do
 	end
 
 	local function decodeM(body, mapK)
-		-- m-encoding: base64-like groups of 4 → 3 bytes
+		-- m-encoding: base64-like groups of 4 → 3 bytes (no ^ to avoid string/number pow)
 		if type(body) ~= "string" or #body < 1 then return nil end
 		local out = {}
 		local t = 1
 		local O = #body
 		local N, M = 0, 0
+		local pow64 = { [0] = 262144, [1] = 4096, [2] = 64, [3] = 1 }
 		while t <= O do
 			local ch = string.sub(body, t, t)
 			local U = mapK[ch]
-			if U then
-				N = N + U * (64 ^ ((3 - M)))
+			if type(U) == "string" then U = tonumber(U) end
+			if type(U) == "number" then
+				local mul = pow64[M] or 1
+				N = N + (U * mul)
 				M = M + 1
 				if M == 4 then
 					M = 0
 					local c = math.floor(N / 65536) % 256
 					local u = math.floor(N / 256) % 256
 					local o = N % 256
-					out[#out+1] = string.char(c, u, o)
+					if c >= 0 and c < 256 and u >= 0 and u < 256 and o >= 0 and o < 256 then
+						out[#out+1] = string.char(c, u, o)
+					end
 					N = 0
 				end
 			elseif ch == "=" then
-				out[#out+1] = string.char(math.floor(N / 65536) % 256)
+				local c = math.floor(N / 65536) % 256
+				out[#out+1] = string.char(c)
 				if t >= O or string.sub(body, t + 1, t + 1) ~= "=" then
-					out[#out+1] = string.char(math.floor((N % 65536) / 256) % 256)
+					local u = math.floor((N % 65536) / 256) % 256
+					out[#out+1] = string.char(u)
 				end
 				break
 			end
@@ -2286,16 +2296,24 @@ if not loadOk then
 else
 	-- Always run; Luraph hits budget via buffer/bit32/task.wait hooks (Lune has no debug.sethook)
 	local isLuraphSrc = string.find(source, "Luraph", 1, true) or string.find(source, "lura.ph", 1, true)
+	local isWeAreDevs = string.find(source, "wearedevs%.net/obfuscator", 1, true)
+		or string.find(source, "wearedevs", 1, true)
+		or string.find(source, 'local c={"T', 1, true)
 	if isLuraphSrc then
-		BUDGET = math.min(BUDGET, 25) -- hard wall for heavy VMs
+		BUDGET = math.min(BUDGET, 25)
 	end
-	local runOk, runErr = pcall(chunk)
-	flushChar()
-	flushUtf8()
-	if not runOk and type(runErr) == "string" then
-		if not string.find(runErr, "budget", 1, true) then
-			-- never leak host paths / C frames / engine names
-			lines[#lines + 1] = "[NOTE] runtime stopped"
+	-- WeAreDevs: static T/m decode only — VM hits pow(string, number) in their interpreter
+	local runOk, runErr = true, nil
+	if isWeAreDevs then
+		runOk = true
+	else
+		runOk, runErr = pcall(chunk)
+		flushChar()
+		flushUtf8()
+		if not runOk and type(runErr) == "string" then
+			if not string.find(runErr, "budget", 1, true) then
+				lines[#lines + 1] = "[NOTE] runtime stopped"
+			end
 		end
 	end
 	-- Phase 2: deep re-harvest every loadstring-src already captured + try small nested runs
