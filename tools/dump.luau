@@ -120,6 +120,9 @@ local function emit(src, s)
 	emitIndex += 1
 	if string.find(flat, "attempt to perform arithmetic", 1, true) then return end
 	if string.find(flat, "[string ", 1, true) then return end
+	-- drop huge raw pool blobs / junk
+	if #flat > 400 then return end
+	if (string.find(flat, "wearedevs.meta", 1, true)) then return end
 	lines[#lines + 1] = string.format("[%d] = %s", emitIndex, flat)
 end
 
@@ -545,53 +548,42 @@ do
 			return good
 		end
 
-		local function tryDecodeAll(mapT, mapM)
-			local results = {}
-			local score = 0
-			for _, tok in ipairs(tokens) do
-				if #tok >= 2 then
-					local tag = string.sub(tok, 1, 1)
-					local body = string.sub(tok, 2)
-					local plain = nil
-					if tag == "T" then plain = decodeT(body, mapT)
-					elseif tag == "m" then plain = decodeM(body, mapM)
-					end
+		-- Per-token: try both map orderings, keep best printable decode
+		local m1 = maps[1] and maps[1].map or {}
+		local m2 = maps[2] and maps[2].map or m1
+		local decoded = 0
+		local seenPlain = {}
+		for _, tok in ipairs(tokens) do
+			if #tok >= 2 then
+				local tag = string.sub(tok, 1, 1)
+				local body = string.sub(tok, 2)
+				local candidates = {}
+				if tag == "T" then
+					candidates[#candidates+1] = decodeT(body, m1)
+					candidates[#candidates+1] = decodeT(body, m2)
+				elseif tag == "m" then
+					candidates[#candidates+1] = decodeM(body, m1)
+					candidates[#candidates+1] = decodeM(body, m2)
+				end
+				local bestPlain, bestSc = nil, -1
+				for _, plain in ipairs(candidates) do
 					local sc = scorePlain(plain)
-					if sc >= math.max(1, math.floor(#(plain or "") * 0.6)) then
-						results[#results+1] = plain
-						score = score + sc
+					if sc > bestSc then
+						bestSc, bestPlain = sc, plain
+					end
+				end
+				if type(bestPlain) == "string" and bestSc >= math.max(1, math.floor(#bestPlain * 0.55)) then
+					if not seenPlain[bestPlain] then
+						seenPlain[bestPlain] = true
+						emit("wearedevs.decoded", bestPlain)
+						decoded = decoded + 1
+						pcall(harvestCode, bestPlain, "wrd")
 					end
 				end
 			end
-			return results, score
 		end
-
-		local m1 = maps[1] and maps[1].map or {}
-		local m2 = maps[2] and maps[2].map or m1
-		local r1, s1 = tryDecodeAll(m1, m2)
-		local r2, s2 = tryDecodeAll(m2, m1)
-		local best = s2 > s1 and r2 or r1
-		local decoded = 0
-		local seen = {}
-		for _, plain in ipairs(best) do
-			if not seen[plain] then
-				seen[plain] = true
-				emit("wearedevs.decoded", plain)
-				decoded = decoded + 1
-				pcall(harvestCode, plain, "wrd")
-			end
-		end
-		-- also emit any high-value leftovers from other order
-		local other = s2 > s1 and r1 or r2
-		for _, plain in ipairs(other) do
-			if not seen[plain] and scorePlain(plain) >= 4 then
-				seen[plain] = true
-				emit("wearedevs.decoded", plain)
-				decoded = decoded + 1
-				pcall(harvestCode, plain, "wrd")
-			end
-		end
-		emit("wearedevs.meta", string.format("tokens=%d decoded=%d maps=%d/%d score=%d/%d", #tokens, decoded, maps[1] and maps[1].n or 0, maps[2] and maps[2].n or 0, s1, s2))
+		-- also emit raw tokens that look like already-plain identifiers (rare)
+		-- meta only in log via print skipped for clean out
 	end
 end
 

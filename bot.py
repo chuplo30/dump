@@ -278,10 +278,53 @@ def health():
 
 
 
+
+def wrd_obfuscate(script: str) -> str:
+    """Call WeAreDevs obfuscator API. Returns obfuscated source or raises."""
+    import json
+    url = "https://wearedevs.net/api/obfuscate"
+    payload = json.dumps({"script": script}).encode("utf-8")
+    headers = {
+        "accept": "*/*",
+        "accept-language": "vi-VN,vi;q=0.9,en-US;q=0.6,en;q=0.5",
+        "content-type": "application/json",
+        "origin": "https://wearedevs.net",
+        "referer": "https://wearedevs.net/obfuscator",
+        "user-agent": (
+            "Mozilla/5.0 (Linux; Android 16; Pixel 10) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/155.0.0.0 Mobile Safari/537.36"
+        ),
+    }
+    # optional session cookies from env (expire often)
+    cookie = os.environ.get("WRD_COOKIE", "").strip()
+    if cookie:
+        headers["cookie"] = cookie
+    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as ex:
+        raise RuntimeError("error") from ex
+    except Exception as ex:
+        raise RuntimeError("error") from ex
+    try:
+        data = json.loads(body)
+    except Exception as ex:
+        raise RuntimeError("error") from ex
+    if not isinstance(data, dict) or not data.get("success"):
+        raise RuntimeError("error")
+    out = data.get("obfuscated") or data.get("result") or data.get("code")
+    if not out or not isinstance(out, str):
+        raise RuntimeError("error")
+    return out
+
 def format_user_error(ex) -> str:
     err = sanitize_public_error(ex)
     if "url / file" in err:
         return "url / file or send a code block"
+    if err.strip().lower() == "error":
+        return "error"
     return "dump failed:\n```\n" + err + "\n```"
 
 def start_flask():
@@ -392,6 +435,108 @@ async def cmd_dump(ctx: commands.Context):
 
 
 
+
+@bot.command(name="d")
+async def cmd_d(ctx: commands.Context):
+    await do_dump(ctx, silent=False)
+
+
+@bot.command(name="get")
+async def cmd_get(ctx: commands.Context):
+    """Fetch URL / attachment → message.txt (no dump)."""
+    if ctx.author.bot:
+        return
+    try:
+        content = ctx.message.content or ""
+        urls = URL_RE.findall(content)
+        data = None
+
+        if ctx.message.attachments:
+            att = ctx.message.attachments[0]
+            if att.size and att.size > MAX_SOURCE:
+                raise RuntimeError("file too large")
+            raw = await att.read()
+            if len(raw) > MAX_SOURCE:
+                raise RuntimeError("file too large")
+            data = raw
+        elif urls:
+            url = urls[0].rstrip(".,;>")
+            log("[get]", url)
+            text = await asyncio.to_thread(fetch_url, url)
+            data = text.encode("utf-8", errors="replace")
+        else:
+            lines = content.split("\n")
+            first = (
+                re.sub(r"^[.\s]*get\b", "", lines[0], count=1, flags=re.I).strip()
+                if lines
+                else ""
+            )
+            rest = (
+                "\n".join([first] + lines[1:])
+                if first
+                else "\n".join(lines[1:] if lines else [])
+            )
+            rest = rest.strip()
+            if not rest:
+                raise RuntimeError("url / file or send a code block")
+            data = rest.encode("utf-8", errors="replace")
+
+        tmp = tempfile.NamedTemporaryFile(prefix="wxz_get_", suffix=".txt", delete=False)
+        try:
+            tmp.write(data)
+            tmp.close()
+            await ctx.reply(
+                file=discord.File(tmp.name, filename="message.txt"),
+                mention_author=False,
+            )
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+    except Exception as ex:
+        await ctx.reply(format_user_error(ex), mention_author=False)
+
+@bot.command(name="wrd")
+async def cmd_wrd(ctx: commands.Context):
+    """WeAreDevs obfuscator API → message.txt"""
+    if ctx.author.bot:
+        return
+    status = await ctx.reply("cooking…", mention_author=False)
+    try:
+        source = await extract_source(ctx.message)
+        if not source or not str(source).strip():
+            raise RuntimeError("url / file or send a code block")
+        if len(source) > MAX_SOURCE:
+            raise RuntimeError("file too large")
+        obf = await asyncio.to_thread(wrd_obfuscate, source)
+        tmp = tempfile.NamedTemporaryFile(prefix="wxz_wrd_", suffix=".txt", delete=False)
+        try:
+            tmp.write(obf.encode("utf-8", errors="replace"))
+            tmp.close()
+            await ctx.reply(
+                file=discord.File(tmp.name, filename="message.txt"),
+                mention_author=False,
+            )
+            try:
+                await status.delete()
+            except discord.HTTPException:
+                pass
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+    except Exception as ex:
+        msg = format_user_error(ex)
+        if msg != "url / file or send a code block":
+            msg = "error"
+        try:
+            await status.edit(content=msg)
+        except discord.HTTPException:
+            await ctx.reply(msg, mention_author=False)
+
+
 def main():
     if not TOKEN:
         log("ERROR: set DISCORD_TOKEN")
@@ -407,3 +552,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
