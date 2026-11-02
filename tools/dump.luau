@@ -88,7 +88,7 @@ local lines, seen, charBuf, utf8Buf = {}, {}, {}, {}
 local function interesting(s)
 	if type(s) ~= "string" then return false end
 	local n = #s
-	if n < 1 or n > 2000 then return false end
+	if n < 1 or n > 8000 then return false end
 	-- reject pure whitespace
 	if string.match(s, "^%s*$") then return false end
 	-- reject single digit-only noise under 2 chars unless letter
@@ -700,9 +700,29 @@ local hostRep = string.rep
 local hostSub = string.sub
 local hostByte = string.byte
 
+local wordBuf = {}
+local function flushWord()
+	if #wordBuf == 0 then return end
+	local s = table.concat(wordBuf)
+	wordBuf = {}
+	if #s >= 2 then emit("string.stream", s) end
+end
+local function pushStreamByte(b)
+	if type(b) ~= "number" then return end
+	b = b % 256
+	if (b >= 32 and b <= 126) or b == 9 then
+		wordBuf[#wordBuf + 1] = string.char(b)
+		if #wordBuf >= 512 then flushWord() end
+	else
+		flushWord()
+	end
+end
 local function flushChar()
 	if #charBuf == 0 then return end
 	local ok, s = pcall(hostChar, table.unpack(charBuf))
+	for i = 1, #charBuf do
+		pushStreamByte(charBuf[i])
+	end
 	charBuf = {}
 	if ok and type(s) == "string" then emit("string.char[buffered]", s) end
 end
@@ -1134,6 +1154,9 @@ softInst = function(className, name)
 	local o = {}
 	setmetatable(o, {
 		__index = function(_, k)
+			if type(k) == "string" and #k >= 2 and #k < 80 then
+				emit("inst:key", k)
+			end
 			if props[k] ~= nil then return props[k] end
 			if k == "WaitForChild" or k == "FindFirstChild" or k == "FindFirstChildOfClass"
 				or k == "FindFirstChildWhichIsA" or k == "FindFirstAncestor" or k == "FindFirstAncestorOfClass"
@@ -1312,8 +1335,111 @@ pcall(function() local mt = getmetatable(lp); end)
 serviceCache.LocalPlayer = lp
 serviceCache.Players.LocalPlayer = lp
 
+-- Thick stubs for WRD env-detect dumps
+do
+	local function method(ret)
+		return function() return ret end
+	end
+	local rs = serviceCache.RunService or softInst("RunService", "RunService")
+	serviceCache.RunService = rs
+	-- Prefer real-ish IsClient/IsRunning
+	pcall(function()
+		rs.IsClient = method(true)
+		rs.IsServer = method(false)
+		rs.IsRunning = method(true)
+		rs.IsStudio = method(false)
+	end)
+	local ts = serviceCache.TextService or softInst("TextService", "TextService")
+	serviceCache.TextService = ts
+	pcall(function()
+		ts.GetTextSize = function() return { X = 40, Y = 14 } end
+	end)
+	local gs = serviceCache.GuiService or softInst("GuiService", "GuiService")
+	serviceCache.GuiService = gs
+	pcall(function()
+		gs.GetGuiInset = function() return { X = 0, Y = 36 }, { X = 0, Y = 0 } end
+	end)
+	local uis = serviceCache.UserInputService or softInst("UserInputService", "UserInputService")
+	serviceCache.UserInputService = uis
+	pcall(function()
+		uis.IsKeyDown = function() return false end
+	end)
+	local cas = serviceCache.ContextActionService or softInst("ContextActionService", "ContextActionService")
+	serviceCache.ContextActionService = cas
+	pcall(function()
+		cas.GetAllBoundActionInfo = function() return {} end
+	end)
+	local ss = serviceCache.SoundService or softInst("SoundService", "SoundService")
+	serviceCache.SoundService = ss
+	pcall(function() ss.RolloffScale = 1 end)
+	local li = serviceCache.Lighting or softInst("Lighting", "Lighting")
+	serviceCache.Lighting = li
+	pcall(function()
+		li.ClockTime = 14
+		li.Brightness = 2
+	end)
+	local hs = serviceCache.HttpService or softInst("HttpService", "HttpService")
+	serviceCache.HttpService = hs
+	pcall(function() hs.HttpEnabled = true end)
+	local tw = serviceCache.TweenService or softInst("TweenService", "TweenService")
+	serviceCache.TweenService = tw
+	pcall(function()
+		tw.GetValue = function() return 0.5 end
+	end)
+	local cp = serviceCache.ContentProvider or softInst("ContentProvider", "ContentProvider")
+	serviceCache.ContentProvider = cp
+	pcall(function()
+		cp.GetRequestQueueSize = function() return 0 end
+	end)
+	local cam = softInst("Camera", "Camera")
+	pcall(function()
+		serviceCache.Workspace.CurrentCamera = cam
+		cam.ClassName = "Camera"
+		cam.CFrame = { Position = { X = 0, Y = 0, Z = 0 } }
+	end)
+	pcall(function()
+		serviceCache.Players.GetPlayerByUserId = function(_, id)
+			if id == 1 then return lp end
+			return nil
+		end
+	end)
+end
+
 local env = {}
 env.game = game
+env.Game = game
+-- WRD env-detect scripts probe these constantly
+do
+	local function setProp(o, k, v)
+		if type(o) == "table" then
+			rawset(o, k, v)
+		end
+	end
+	setProp(game, "JobId", "00000000-0000-0000-0000-000000000000")
+	setProp(game, "PlaceId", 0)
+	setProp(game, "GameId", 0)
+	setProp(game, "PlaceVersion", 1)
+	setProp(game, "CreatorId", 0)
+	setProp(game, "CreatorType", "User")
+	setProp(game, "ClassName", "DataModel")
+	setProp(game, "Name", "Game")
+	if serviceCache.Workspace then
+		setProp(serviceCache.Workspace, "ClassName", "Workspace")
+		setProp(serviceCache.Workspace, "Name", "Workspace")
+		setProp(serviceCache.Workspace, "Gravity", 196.2)
+		setProp(serviceCache.Workspace, "DistributedGameTime", 0)
+		setProp(serviceCache.Workspace, "StreamingEnabled", false)
+	end
+	if serviceCache.Players then
+		setProp(serviceCache.Players, "ClassName", "Players")
+	end
+	if serviceCache.LocalPlayer then
+		setProp(serviceCache.LocalPlayer, "UserId", 1)
+		setProp(serviceCache.LocalPlayer, "DisplayName", "Player")
+		setProp(serviceCache.LocalPlayer, "Name", "Player")
+		setProp(serviceCache.LocalPlayer, "ClassName", "Player")
+	end
+end
 env.workspace = serviceCache.Workspace
 env.Workspace = serviceCache.Workspace
 env.Instance = { new = function(c, parent)
@@ -1537,7 +1663,19 @@ env.table = setmetatable({
 	concat = function(list, sep, i, j)
 		flushChar()
 		local r = hostConcat(list, sep, i, j)
-		if type(r) == "string" then emit("table.concat", r) end
+		if type(r) == "string" then
+			emit("table.concat", r)
+			-- force-keep detect / payload style lines even if filtered elsewhere
+			if string.find(r, "DETECT", 1, true) or string.find(r, "JobId", 1, true)
+				or string.find(r, "PAYLOAD", 1, true) or string.find(r, "Detection", 1, true) then
+				local key = r
+				if not seen[key] then
+					seen[key] = true
+					emitIndex += 1
+					lines[#lines + 1] = string.format("[%d] = %s", emitIndex, r)
+				end
+			end
+		end
 		return r
 	end,
 	insert = function(list, pos, val)
@@ -1945,8 +2083,18 @@ end
 env.print = function(...)
 	for i = 1, select("#", ...) do
 		local v = select(i, ...)
-		if type(v) == "string" and #v >= 1 then emit("print", v)
-		elseif type(v) ~= "nil" then emit("print", tostring(v)) end
+		local s = type(v) == "string" and v or tostring(v)
+		if type(s) == "string" and #s >= 1 then
+			emit("print", s)
+			if string.find(s, "DETECT", 1, true) or string.find(s, "PAYLOAD", 1, true)
+				or string.find(s, "Detection", 1, true) or string.find(s, "Passed", 1, true) then
+				if not seen[s] then
+					seen[s] = true
+					emitIndex += 1
+					lines[#lines + 1] = string.format("[%d] = %s", emitIndex, s)
+				end
+			end
+		end
 	end
 end
 env.warn = env.print
@@ -2258,51 +2406,255 @@ if type(Fidelity) == "table" then
 	end
 end -- Fidelity overlay
 
--- Always install budget setmetatable even without Fidelity
+-- ========== GENERIC VM HOOK LAYER ==========
+-- Works for WRD / Luraph-style / IronBrew-like / any setmetatable VM:
+-- 1) wrap every metatable method (budget + string harvest)
+-- 2) numeric missing keys → 0 (register files)
+-- 3) capture __index/__newindex/__call string traffic
+-- 4) __reg() for rewritten register tables
 do
 	local hostSet = setmetatable
+	local hostRawset = rawset
+	local hostRawget = rawget
+
+	local function safeCall(fn, ...)
+		local pack = table.pack(pcall(fn, ...))
+		if not pack[1] then
+			local err = tostring(pack[2] or "")
+			if string.find(err, "budget", 1, true) then
+				error("budget", 0)
+			end
+			-- swallow VM metamethod errors so the outer loop can continue when possible
+			return nil
+		end
+		return table.unpack(pack, 2, pack.n)
+	end
+
+	local function harvestVal(tag, v)
+		if type(v) == "string" and #v >= 1 and #v < 8000 then
+			emit(tag, v)
+		elseif type(v) == "table" then
+			-- shallow: array strings only
+			local n = #v
+			if n > 0 and n < 500 then
+				for i = 1, n do
+					local e = rawget(v, i)
+					if type(e) == "string" and #e >= 1 then emit(tag .. ".arr", e) end
+				end
+			end
+		end
+	end
+
 	local function wrapMt(mt)
 		if type(mt) ~= "table" then return mt end
-		local w = {}
+		-- already wrapped?
+		if rawget(mt, "__wxz_wrapped") then return mt end
+		local w = { __wxz_wrapped = true }
+		local origIndex = mt.__index
+		local origNew = mt.__newindex
+
 		for k, v in pairs(mt) do
-			if type(v) == "function" then
+			if k ~= "__index" and k ~= "__newindex" and type(v) == "function" then
 				local fn, key = v, k
 				w[k] = function(...)
-					if dumpCheck() then
-						if key == "__add" or key == "__sub" or key == "__mul" or key == "__div"
-							or key == "__pow" or key == "__mod" then return 0 end
+					if os.clock() - started > BUDGET then error("budget", 0) end
+					local results = table.pack(pcall(fn, ...))
+					if not results[1] then
+						local err = tostring(results[2] or "")
+						if string.find(err, "budget", 1, true) then error("budget", 0) end
+						-- arithmetic-safe defaults for VM ops
+						if key == "__add" or key == "__sub" or key == "__mul" or key == "__mod" or key == "__pow" then
+							return 0
+						end
+						if key == "__div" then return 1 end
 						if key == "__eq" or key == "__lt" or key == "__le" then return false end
+						if key == "__len" then return 0 end
+						if key == "__concat" then return "" end
+						if key == "__tostring" then return "" end
 						if key == "__call" then return end
 						return nil
 					end
-					if key == "__index" then
-						local idx = select(2, ...)
-						if type(idx) == "string" and #idx >= 2 then emit("vm:mtindex", idx) end
+					for i = 2, results.n do
+						harvestVal("vm:" .. key, results[i])
 					end
-					return fn(...)
+					return table.unpack(results, 2, results.n)
 				end
-			else
+			elseif k ~= "__index" and k ~= "__newindex" then
 				w[k] = v
 			end
 		end
+
+		w.__index = function(obj, key)
+			if os.clock() - started > BUDGET then error("budget", 0) end
+			if type(key) == "string" and #key >= 1 then emit("vm:idx", key) end
+			local v
+			if origIndex == nil then
+				v = hostRawget(obj, key)
+			elseif type(origIndex) == "function" then
+				local ok, r = pcall(origIndex, obj, key)
+				v = ok and r or nil
+			elseif type(origIndex) == "table" then
+				v = origIndex[key]
+			end
+			if v == nil and type(key) == "number" then
+				return 0
+			end
+			harvestVal("vm:idxv", v)
+			return v
+		end
+
+		w.__newindex = function(obj, key, val)
+			if os.clock() - started > BUDGET then error("budget", 0) end
+			if type(key) == "string" and #key >= 1 then emit("vm:newk", key) end
+			harvestVal("vm:newv", val)
+			if origNew == nil then
+				hostRawset(obj, key, val)
+			elseif type(origNew) == "function" then
+				pcall(origNew, obj, key, val)
+			else
+				hostRawset(obj, key, val)
+			end
+		end
+
 		return w
 	end
+
 	env.setmetatable = function(obj, mt)
 		return hostSet(obj, wrapMt(mt))
 	end
+	env.getmetatable = getmetatable
+	env.rawset = function(t, k, v)
+		harvestVal("rawset", v)
+		if type(k) == "string" then emit("rawset:k", k) end
+		return hostRawset(t, k, v)
+	end
+	-- CRITICAL: rawget on register holes must not return nil (Luau 1+nil = hard error)
+	env.rawget = function(t, k)
+		local v = hostRawget(t, k)
+		if v == nil and type(k) == "number" then
+			return 0
+		end
+		harvestVal("rawget", v)
+		return v
+	end
+	-- select() on sparse register packs
+	local hostSelect = select
+	env.select = function(i, ...)
+		if i == "#" then return hostSelect("#", ...) end
+		local n = hostSelect("#", ...)
+		if type(i) == "number" and i >= 1 and i <= n then
+			local v = hostSelect(i, ...)
+			if v == nil then return 0 end
+			return v
+		end
+		return hostSelect(i, ...)
+	end
 end
 
-local softTbl = setmetatable({}, {
-	__index = function() return function() return nil end end,
-	__newindex = function() end,
-	__call = function() return nil end,
+-- Safe arithmetic globals some VMs bind via getfenv
+env.__add = function(a, b) return (tonumber(a) or 0) + (tonumber(b) or 0) end
+env.__sub = function(a, b) return (tonumber(a) or 0) - (tonumber(b) or 0) end
+env.__mul = function(a, b) return (tonumber(a) or 0) * (tonumber(b) or 0) end
+env.__div = function(a, b)
+	local d = tonumber(b) or 1
+	if d == 0 then d = 1 end
+	return (tonumber(a) or 0) / d
+end
+
+
+-- Arithmetic-safe soft value for missing globals / unknown services
+local softProxy
+softProxy = setmetatable({}, {
+	__index = function(_, k)
+		if type(k) == "string" and #k >= 2 then emit("soft:idx", k) end
+		return softProxy
+	end,
+	__newindex = function(_, k, v)
+		if type(v) == "string" and #v >= 1 then emit("soft:new", v) end
+		if type(k) == "string" and #k >= 1 then emit("soft:newk", k) end
+	end,
+	__call = function(_, ...)
+		for i = 1, select("#", ...) do
+			local a = select(i, ...)
+			if type(a) == "string" and #a >= 1 then emit("soft:call", a) end
+		end
+		return softProxy
+	end,
+	__add = function(a, b)
+		return (tonumber(a) or 0) + (tonumber(b) or 0)
+	end,
+	__sub = function(a, b)
+		return (tonumber(a) or 0) - (tonumber(b) or 0)
+	end,
+	__mul = function(a, b)
+		return (tonumber(a) or 0) * (tonumber(b) or 0)
+	end,
+	__div = function(a, b)
+		local d = tonumber(b) or 1
+		if d == 0 then d = 1 end
+		return (tonumber(a) or 0) / d
+	end,
+	__mod = function(a, b)
+		local d = tonumber(b) or 1
+		if d == 0 then d = 1 end
+		return (tonumber(a) or 0) % d
+	end,
+	__pow = function(a, b)
+		return (tonumber(a) or 0) ^ (tonumber(b) or 0)
+	end,
+	__unm = function(a)
+		return -(tonumber(a) or 0)
+	end,
+	__eq = function() return false end,
+	__lt = function() return false end,
+	__le = function() return false end,
+	__len = function() return 0 end,
+	__concat = function(a, b)
+		local sa = type(a) == "string" and a or tostring(a or "")
+		local sb = type(b) == "string" and b or tostring(b or "")
+		local r = sa .. sb
+		if #r >= 1 then emit("soft:cat", r) end
+		return r
+	end,
+	__tostring = function() return "" end,
 })
+local softTbl = softProxy
+
+-- Register-file factory used by source transform of VM obfuscators
+env.__n = function(v)
+	local ty = type(v)
+	if ty == "number" then return v end
+	if ty == "string" then return tonumber(v) or 0 end
+	return 0
+end
+env.__reg = function()
+	return setmetatable({}, {
+		__index = function(t, k)
+			local v = rawget(t, k)
+			if v ~= nil then return v end
+			if type(k) == "number" then return 0 end
+			if type(k) == "string" and #k >= 1 then emit("reg:idx", k) end
+			return softProxy
+		end,
+		__newindex = function(t, k, v)
+			-- WRD does W[i]=nil to free; keep 0 so later W[i]+n never sees nil
+			if v == nil and type(k) == "number" then
+				rawset(t, k, 0)
+				return
+			end
+			rawset(t, k, v)
+			if type(v) == "string" and #v >= 1 then emit("reg:new", v) end
+			if type(k) == "string" and #k >= 1 then emit("reg:newk", k) end
+		end,
+	})
+end
+
 setmetatable(env, {
 	__index = function(_, k)
 		local v = rawget(_G, k)
 		if v ~= nil then return v end
-		if type(k) == "string" then return softTbl end
-		return nil
+		if type(k) == "string" then return softProxy end
+		return softProxy
 	end,
 })
 
@@ -2534,6 +2886,411 @@ do
 	end
 end
 
+
+
+
+
+-- WRD_X_DECODER: generic WeAreDevs (all builds)
+-- Format A: M={"\\ddd..."} + N alphabet → custom base64
+-- Format B: P={">...","L..."} + h/g alphabets → radix85 / base64 with prefix
+do
+	local function foldExpr(expr)
+		if type(expr) ~= "string" then return nil end
+		expr = string.gsub(expr, "%s+", "")
+		local prev
+		repeat
+			prev = expr
+			expr = string.gsub(expr, "%-%(%-(%d+)%)", "+%1")
+		until expr == prev
+		-- tokenize numbers and + - * %
+		do
+			local okc = true
+			for ci = 1, #expr do
+				local ch = string.sub(expr, ci, ci)
+				if not string.match(ch, "%d") and ch ~= "+" and ch ~= "-" and ch ~= "*" and ch ~= "%" then
+					okc = false
+					break
+				end
+			end
+			if not okc then return nil end
+		end
+		-- shunting: left-to-right for +-, *% have precedence via two-pass
+		-- Pass1: handle * and %
+		local tokens = {}
+		local i = 1
+		local sign = 1
+		if string.sub(expr, 1, 1) == "-" then sign = -1; i = 2
+		elseif string.sub(expr, 1, 1) == "+" then i = 2 end
+		while i <= #expr do
+			local j = i
+			while j <= #expr and string.match(string.sub(expr, j, j), "%d") do j += 1 end
+			if j == i then return nil end
+			local n = tonumber(string.sub(expr, i, j - 1))
+			if not n then return nil end
+			n = sign * n
+			-- look at following * or %
+			while j <= #expr do
+				local op = string.sub(expr, j, j)
+				if op == "*" or op == "%" then
+					j += 1
+					local k = j
+					local s2 = 1
+					if string.sub(expr, j, j) == "-" then s2 = -1; j += 1; k = j
+					elseif string.sub(expr, j, j) == "+" then j += 1; k = j end
+					while k <= #expr and string.match(string.sub(expr, k, k), "%d") do k += 1 end
+					if k == j then return nil end
+					local m = tonumber(string.sub(expr, j, k - 1))
+					if not m then return nil end
+					m = s2 * m
+					if op == "*" then n = n * m else n = n % m end
+					j = k
+				else
+					break
+				end
+			end
+			tokens[#tokens + 1] = n
+			if j > #expr then break end
+			local op = string.sub(expr, j, j)
+			if op == "+" then sign = 1
+			elseif op == "-" then sign = -1
+			else return nil end
+			i = j + 1
+		end
+		local total = 0
+		for _, v in ipairs(tokens) do total += v end
+		return total
+	end
+
+	local function parseMapBody(body)
+		local map = {}
+		for k, expr in string.gmatch(body, "([A-Za-z_])%s*=%s*([^,;]+)") do
+			local v = foldExpr(expr)
+			if v then map[k] = v end
+		end
+		for k, expr in string.gmatch(body, '%[%s*"((?:\\.|[^"\\])*)"%s*%]%s*=%s*([^,;]+)') do
+			local key = string.gsub(k, "\\(.)", "%1")
+			if #key == 1 then
+				local v = foldExpr(expr)
+				if v then map[key] = v end
+			end
+		end
+		return map
+	end
+
+	local function extractMaps(src)
+		local maps = {}
+		local pos = 1
+		while true do
+			local s1 = string.find(src, "local%s+%w+%s*=%s*{", pos)
+			if not s1 then break end
+			local brace = string.find(src, "{", s1, true)
+			if not brace then break end
+			local depth, j = 1, brace + 1
+			while j <= #src and depth > 0 do
+				local ch = string.sub(src, j, j)
+				if ch == "{" then depth += 1
+				elseif ch == "}" then depth -= 1
+				elseif ch == '"' or ch == "'" then
+					local q = ch
+					j += 1
+					while j <= #src do
+						local c2 = string.sub(src, j, j)
+						if c2 == "\\" then j += 2
+						elseif c2 == q then break
+						else j += 1 end
+					end
+				end
+				j += 1
+			end
+			local body = string.sub(src, brace + 1, j - 2)
+			local map = parseMapBody(body)
+			local n = 0
+			for _ in pairs(map) do n += 1 end
+			if n >= 40 then
+				maps[#maps + 1] = map
+			end
+			pos = j
+			if pos > #src then break end
+		end
+		return maps
+	end
+
+	local function extractStringPool(src)
+		-- first large {"...","..."} after wearedevs / return(function
+		local best, bestN = {}, 0
+		local pos = 1
+		while true do
+			local s1 = string.find(src, "local%s+%w+%s*=%s*{", pos)
+			if not s1 then break end
+			local brace = string.find(src, "{", s1, true)
+			if not brace then break end
+			local parts = {}
+			local p = brace + 1
+			local limit = math.min(#src, brace + 250000)
+			local depth = 1
+			while p <= limit and depth > 0 do
+				local ch = string.sub(src, p, p)
+				if ch == "{" then depth += 1; p += 1
+				elseif ch == "}" then depth -= 1; p += 1
+				elseif ch == '"' then
+					p += 1
+					local buf = {}
+					while p <= limit do
+						local c = string.sub(src, p, p)
+						if c == "\\" and p < limit then
+							local n = string.sub(src, p + 1, p + 1)
+							if string.match(n, "%d") then
+								local j = p + 1
+								while j <= limit and j < p + 4 and string.match(string.sub(src, j, j), "%d") do
+									j += 1
+								end
+								local num = tonumber(string.sub(src, p + 1, j - 1))
+								if num and num <= 255 then buf[#buf + 1] = string.char(num) end
+								p = j
+							elseif n == "n" then buf[#buf+1] = "\n"; p += 2
+							elseif n == "t" then buf[#buf+1] = "\t"; p += 2
+							elseif n == "r" then buf[#buf+1] = "\r"; p += 2
+							elseif n == "\\" or n == '"' or n == "'" then buf[#buf+1] = n; p += 2
+							else buf[#buf+1] = n; p += 2 end
+						elseif c == '"' then
+							p += 1
+							break
+						else
+							buf[#buf + 1] = c
+							p += 1
+						end
+					end
+					parts[#parts + 1] = table.concat(buf)
+				else
+					p += 1
+				end
+			end
+			if #parts > bestN then
+				bestN, best = #parts, parts
+			end
+			pos = p
+			if pos > #src then break end
+		end
+		return best
+	end
+
+	local function customB64(W, alphabet)
+		if type(W) ~= "string" or #W < 1 then return nil end
+		local q, h, S, i, b = {}, 0, 0, 1, #W
+		while i <= b do
+			local ch = string.sub(W, i, i)
+			local x = alphabet[ch]
+			if x then
+				h = h + x * (64 ^ (3 - S))
+				S = S + 1
+				if S == 4 then
+					S = 0
+					q[#q + 1] = string.char(
+						math.floor(h / 65536) % 256,
+						math.floor((h % 65536) / 256) % 256,
+						h % 256
+					)
+					h = 0
+				end
+			elseif ch == "=" then
+				q[#q + 1] = string.char(math.floor(h / 65536) % 256)
+				if i >= b or string.sub(W, i + 1, i + 1) ~= "=" then
+					q[#q + 1] = string.char(math.floor((h % 65536) / 256) % 256)
+				end
+				break
+			end
+			i += 1
+		end
+		return table.concat(q)
+	end
+
+	local function radix85(body, alphabet)
+		if type(body) ~= "string" or #body < 2 then return nil end
+		local RADIX, PAD = 85, 84
+		local out = {}
+		local w, Wlen = 1, #body
+		while w <= Wlen do
+			local remain = Wlen - w + 1
+			local d = remain >= 5 and 5 or remain
+			if d < 2 then break end
+			local E, ok = 0, true
+			for P = 0, 4 do
+				local W
+				if P < d then
+					W = alphabet[string.sub(body, w + P, w + P)]
+					if not W then ok = false break end
+				else
+					W = PAD
+				end
+				E = E * RADIX + W
+			end
+			if ok then
+				local b0 = math.floor(E / 16777216) % 256
+				local b1 = math.floor(E / 65536) % 256
+				local b2 = math.floor(E / 256) % 256
+				local b3 = E % 256
+				if d == 5 then out[#out+1] = string.char(b0, b1, b2, b3)
+				elseif d == 4 then out[#out+1] = string.char(b0, b1, b2)
+				elseif d == 3 then out[#out+1] = string.char(b0, b1)
+				elseif d == 2 then out[#out+1] = string.char(b0)
+				end
+				w += d
+			else
+				w += 1
+			end
+		end
+		return table.concat(out)
+	end
+
+	local function isClean(s)
+		if type(s) ~= "string" or #s < 2 or #s > 8000 then return false end
+		local g = 0
+		for i = 1, #s do
+			local b = string.byte(s, i)
+			if (b >= 32 and b <= 126) or b == 9 or b == 10 then g += 1 end
+		end
+		return g / #s >= 0.85
+	end
+
+	local isWrd = string.find(source, "wearedevs", 1, true)
+		or string.find(source, "wearedevs.net/obfuscator", 1, true)
+	if isWrd then
+		local maps = extractMaps(source)
+		local pool = extractStringPool(source)
+		local b64map, r85map = nil, nil
+		for _, m in ipairs(maps) do
+			local n, mx = 0, 0
+			for _, v in pairs(m) do
+				n += 1
+				if v > mx then mx = v end
+			end
+			if n >= 60 and mx <= 63 and not b64map then b64map = m end
+			if n >= 60 and mx >= 70 and mx <= 90 and not r85map then r85map = m end
+		end
+		-- also try every map on every string and keep best clean
+		local seen = {}
+		local function emitClean(s)
+			if isClean(s) and not seen[s] then
+				seen[s] = true
+				emit("wrd.x", s)
+				pcall(harvestCode, s, "wrdx")
+			end
+		end
+		for _, W in ipairs(pool) do
+			if type(W) == "string" and #W >= 1 then
+				local pref = string.sub(W, 1, 1)
+				local body = string.sub(W, 2)
+				-- prefix L / none → base64 alphabets
+				if b64map then
+					if pref == "L" or pref == "T" or pref == "m" then
+						emitClean(customB64(body, b64map))
+					end
+					emitClean(customB64(W, b64map))
+				end
+				-- prefix > / T → radix85
+				if r85map then
+					if pref == ">" or pref == "T" or pref == "m" then
+	
+					emitClean(radix85(body, r85map))
+					end
+					emitClean(radix85(W, r85map))
+				end
+				-- try all maps
+				for _, m in ipairs(maps) do
+					emitClean(customB64(W, m))
+					if #W >= 2 then emitClean(radix85(string.sub(W, 2), m)) end
+				end
+			end
+		end
+	end
+end
+
+
+
+-- GENERIC VM register rewrite: any multi-stage return(function)...return(function) obfuscator
+-- {} in the VM body → __reg() (numeric miss = 0). Applies to WRD, and similar packed VMs.
+do
+	local idxs = {}
+	local pos = 1
+	while true do
+		local a, b = string.find(source, "return%s*%(%s*function", pos)
+		if not a then break end
+		idxs[#idxs + 1] = a
+		pos = b + 1
+		if #idxs >= 6 then break end
+	end
+	-- Also treat "return function" without paren
+	if #idxs < 2 then
+		pos = 1
+		while true do
+			local a, b = string.find(source, "return%s+function%s*%(", pos)
+			if not a then break end
+			idxs[#idxs + 1] = a
+			pos = b + 1
+			if #idxs >= 6 then break end
+		end
+	end
+	local heavyVm = #idxs >= 2
+		or string.find(source, "wearedevs", 1, true)
+		or string.find(source, "Luraph", 1, true)
+		or string.find(source, "IronBrew", 1, true)
+		or string.find(source, "Moonsec", 1, true)
+		or string.find(source, "Prometheus", 1, true)
+	if heavyVm then
+		-- rewrite entire source for max register safety (pool tables still work as arrays)
+		local cut = 1
+		local head = ""
+		local vm = source
+		if #idxs >= 2 then
+			cut = idxs[math.min(2, #idxs)]
+			head = string.sub(source, 1, cut - 1)
+			vm = string.sub(source, cut)
+		end
+		local out = {}
+		local i = 1
+		while i <= #vm do
+			local ch = string.sub(vm, i, i)
+			if ch == '"' or ch == "'" then
+				local q = ch
+				out[#out + 1] = q
+				i += 1
+				while i <= #vm do
+					local c = string.sub(vm, i, i)
+					out[#out + 1] = c
+					if c == "\\" and i < #vm then
+						out[#out + 1] = string.sub(vm, i + 1, i + 1)
+						i += 2
+					elseif c == q then
+						i += 1
+						break
+					else
+						i += 1
+					end
+				end
+			elseif string.sub(vm, i, i + 1) == "{}" then
+				out[#out + 1] = "__reg()"
+				i += 2
+			else
+				out[#out + 1] = ch
+				i += 1
+			end
+		end
+		source = head .. table.concat(out)
+		-- Safe numeric coercion helper available as global
+		source = "local function __n(v) local t=type(v) if t=='number' then return v end if t=='string' then return tonumber(v)or 0 end return 0 end\n" .. source
+		-- WRD-style refcount: W[X]=W[X]-(CONST)  →  W[X]=__n(W[X])-(CONST)
+		source = string.gsub(source, "([%w_]+)%[([%w_]+)%]%s*=%s*%1%[%2%]%s*%-%s*", "%1[%2]=__n(%1[%2])-")
+		source = string.gsub(source, "([%w_]+)%[([%w_]+)%]%s*=%s*%1%[%2%]%s*%+%s*", "%1[%2]=__n(%1[%2])+")
+		-- A=A+1 style for single-letter numeric counters used by WRD
+		source = string.gsub(source, "([^%w_])([A-Za-z])(%s*=%s*)%2(%s*%+%s*)", function(a,v,eq,op)
+			return a .. v .. eq .. "__n(" .. v .. ")" .. op
+		end)
+		source = string.gsub(source, "([^%w_])([A-Za-z])(%s*=%s*)%2(%s*%-%s*)", function(a,v,eq,op)
+			return a .. v .. eq .. "__n(" .. v .. ")" .. op
+		end)
+	end
+end
+
 -- Prefer environment table (Lune); fallback preamble for older Lune
 local loadOk, chunk
 do
@@ -2560,24 +3317,80 @@ else
 		or string.find(source, "wearedevs", 1, true)
 		or string.find(source, 'local c={"T', 1, true)
 	if isLuraphSrc then
-		BUDGET = math.min(BUDGET, 25)
+		BUDGET = math.max(BUDGET, 45)
 	end
 	-- WeAreDevs: static T/m decode only — VM hits pow(string, number) in their interpreter
 	local runOk, runErr = true, nil
 	local isXHider = string.find(source, "XHider", 1, true)
 		or string.find(source, "ynvq7ED4Sp", 1, true)
 		or string.find(source, "XHD:", 1, true)
-	-- WeAreDevs: static pool only. XHider: MUST run VM so char/concat/loadstring hooks fire (AZT-style).
-	if isWeAreDevs or isXHider then
-		-- XHider/WRD: static self-decode path (Lune has no debug.sethook; VM loops cannot be preempted)
+	local isHeavyVm = isWeAreDevs or isLuraphSrc or isXHider
+		or string.find(source, "IronBrew", 1, true)
+		or string.find(source, "Moonsec", 1, true)
+		or string.find(source, "Prometheus", 1, true)
+		or select(2, string.gsub(source, "return%s*%(%s*function", "")) >= 2
+	if isHeavyVm then
+		BUDGET = math.max(BUDGET, 90)
+		dumpDead = false
+		started = os.clock()
+	end
+	-- XHider / heavy VM: always run so hooks fire
+	if isXHider then
 		runOk = true
-	else
+	end
+	if true then
+		if isWeAreDevs then
+			BUDGET = 120
+			dumpDead = false
+			started = os.clock()
+			-- Official pool decode only (second return(function is the VM)
+			do
+				local idxs = {}
+				local pos = 1
+				while true do
+					local a, b = string.find(source, "return%s*%(%s*function", pos)
+					if not a then break end
+					idxs[#idxs + 1] = a
+					pos = b + 1
+				end
+				if #idxs >= 2 then
+					local head = string.sub(source, 1, idxs[2] - 1)
+					local poolName = string.match(head, "local%s+([%w_]+)%s*=%s*{")
+					if poolName then
+						local tail = string.format([[
+for __i = 1, #%s do
+	local __v = %s[__i]
+	if type(__v) == "string" and #__v >= 1 then
+		emit("wrd.pool", __v)
+	end
+end
+return function() end
+end)(...)
+]], poolName, poolName)
+						local okp, fnp = pcall(luau.load, head .. tail, { debugName = "wrdpool", environment = env })
+						if okp and type(fnp) == "function" then
+							pcall(fnp)
+							flushChar()
+							flushUtf8()
+						end
+					end
+				end
+			end
+		end
+		-- WRD VMs often die on number+nil; retry with forced numeric metatable fallback via soft calls
 		runOk, runErr = pcall(chunk)
+		if not runOk and type(runErr) == "string" and string.find(runErr, "arithmetic", 1, true) then
+			-- second chance: already emitted pool strings; soft-note only
+			runOk = true
+			lines[#lines + 1] = "[NOTE] partial VM (arith)"
+		end
 		flushChar()
 		flushUtf8()
 		if not runOk and type(runErr) == "string" then
 			if not string.find(runErr, "budget", 1, true) then
-				lines[#lines + 1] = "[NOTE] runtime stopped"
+				lines[#lines + 1] = "[NOTE] runtime stopped: " .. string.sub(tostring(runErr), 1, 120)
+			else
+				lines[#lines + 1] = "[NOTE] budget"
 			end
 		end
 	end
@@ -2617,6 +3430,9 @@ else
 	end
 end
 
+pcall(flushWord)
+pcall(flushChar)
+pcall(flushUtf8)
 local out = table.concat(lines, "\n")
 if #out == 0 then out = "[NOTE] no constants captured" end
 out ..= string.format("\n\n-- %d strings\n", emitIndex)

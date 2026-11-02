@@ -263,39 +263,72 @@ async def extract_source_wrd(message: discord.Message) -> str:
     raise RuntimeError("file or send a code block")
 
 
-async def extract_source(message: discord.Message) -> str:
-    for att in message.attachments:
-        if att.size and att.size > MAX_SOURCE:
-            raise RuntimeError("file too large")
-        data = await att.read()
-        if len(data) > MAX_SOURCE:
-            raise RuntimeError("file too large")
-        return data.decode("utf-8", errors="replace")
+async def _read_attachment(att: discord.Attachment) -> str:
+    if att.size and att.size > MAX_SOURCE:
+        raise RuntimeError("file too large")
+    data = await att.read()
+    if len(data) > MAX_SOURCE:
+        raise RuntimeError("file too large")
+    return data.decode("utf-8", errors="replace")
 
+
+async def _source_from_message(message: discord.Message) -> str | None:
+    """Attachment / URL / codeblock / raw body from one message (any author)."""
+    if message.attachments:
+        return await _read_attachment(message.attachments[0])
     content = message.content or ""
     urls = URL_RE.findall(content)
     if urls:
         url = urls[0].rstrip(".,;>")
         log("[fetch]", url)
         return await asyncio.to_thread(fetch_url, url)
-
     m = CODEBLOCK_RE.search(content)
     if m:
         return m.group(1)
-
-    lines = content.split("\n")
-    if lines:
+    rest = content.strip()
+    if rest:
+        # strip command prefix if present
+        lines = rest.split("\n")
         first = re.sub(
             r"^[.\s]*(?:dump|d|get|wrd)\b", "", lines[0], count=1, flags=re.I
         ).strip()
         rest = "\n".join([first] + lines[1:]) if first else "\n".join(lines[1:])
-    else:
-        rest = content
-    rest = rest.strip()
-    if rest:
-        return rest
-    raise RuntimeError("url / file or send a code block")
+        rest = rest.strip()
+        if rest:
+            return rest
+    return None
 
+
+async def extract_source(message: discord.Message) -> str:
+    # 1) this message
+    got = await _source_from_message(message)
+    if got:
+        return got
+
+    # 2) reply target (file from anyone, including bots)
+    ref = message.reference
+    if ref is not None:
+        resolved = getattr(ref, "resolved", None)
+        if isinstance(resolved, discord.Message):
+            got = await _source_from_message(resolved)
+            if got:
+                return got
+        # unresolved / partial — fetch
+        mid = getattr(ref, "message_id", None)
+        cid = getattr(ref, "channel_id", None) or message.channel.id
+        if mid:
+            try:
+                ch = message.channel
+                if cid and getattr(message.channel, "id", None) != cid:
+                    ch = message.guild.get_channel(cid) if message.guild else message.channel
+                target = await ch.fetch_message(mid)
+                got = await _source_from_message(target)
+                if got:
+                    return got
+            except Exception as ex:
+                log("[reply-fetch]", type(ex).__name__, ex)
+
+    raise RuntimeError("url / file or send a code block")
 
 # --- Flask keep-alive (UptimeRobot → GET /health) ---
 flask_app = Flask(__name__)
