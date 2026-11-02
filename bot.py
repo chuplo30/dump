@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parent
 TOOLS = ROOT / "tools"
 BIN = ROOT / "bin"
 DUMP_ENGINE = TOOLS / "dump.luau"
+V2_ENGINE = TOOLS / "v2dump.lua"
 WORK = ROOT / "work"
 WORK.mkdir(parents=True, exist_ok=True)
 
@@ -166,8 +167,136 @@ def fetch_url(url: str) -> str:
     return text
 
 
+
+def _lua_str_literal(s: str) -> str:
+    """Format a Python str as a Lua long-safe quoted string for dump listing."""
+    s = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    # non-printable → \ddd
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if o < 32 or o > 126:
+            out.append(f"\\{o}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
+def v2_output_to_dumpstring(text: str) -> str:
+    """Turn V2 recovered source / print log into classic dumpstring [n] = ... listing."""
+    if not text or not text.strip():
+        return text
+    # Already dumpstring-shaped?
+    if re.search(r"^\[\d+\]\s*=", text, re.M) and text.count("[") > 5:
+        return text
+
+    collected: list[str] = []
+    seen: set[str] = set()
+
+    def add(s: str) -> None:
+        if s is None:
+            return
+        s = str(s)
+        if s == "" or s in seen:
+            return
+        # skip watermarks / pure comments
+        if s.startswith("-- Generated") or s.startswith("--  http"):
+            return
+        seen.add(s)
+        collected.append(s)
+
+    # 1) print("...") / print('...') whole args
+    for m in re.finditer(
+        r"""print\s*\(\s*(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)')\s*\)""",
+        text,
+    ):
+        raw = m.group(1) if m.group(1) is not None else m.group(2)
+        if raw is not None:
+            try:
+                raw = bytes(raw, "utf-8").decode("unicode_escape")
+            except Exception:
+                pass
+            add(raw)
+
+    # 2) Any other "..." string literals in recovered body
+    for m in re.finditer(r'"((?:\\.|[^"\\])*)"', text):
+        raw = m.group(1)
+        try:
+            raw = bytes(raw, "utf-8").decode("unicode_escape")
+        except Exception:
+            pass
+        if len(raw) >= 1:
+            add(raw)
+
+    # 3) Bare identifier-like tokens on their own lines from V2 (rare)
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("print(") or line.startswith("--") or not line:
+            continue
+        # Instance.new("X") already covered by string lit
+        if "DETECT" in line or "Passed:" in line or "Detection complete" in line:
+            # strip print( ) wrapper if any leftover
+            inner = re.sub(r'^print\s*\(\s*"?', "", line)
+            inner = re.sub(r'"?\s*\)\s*$', "", inner)
+            add(inner)
+
+    if not collected:
+        # fallback: keep original text so user still gets something
+        return text
+
+    lines = [f"[{i}] = {_lua_str_literal(s)}" for i, s in enumerate(collected, 1)]
+    lines.append("")
+    lines.append(f"-- {len(collected)} strings")
+    return "\n".join(lines)
+
+
+
+
+def parse_dumpstring_entries(text: str) -> list[str]:
+    """Parse classic [n] = ... dumpstring lines into ordered values."""
+    if not text:
+        return []
+    out: list[str] = []
+    for m in re.finditer(r"^\[\d+\]\s*=\s*(.*)$", text, re.M):
+        val = m.group(1).strip()
+        if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
+            inner = val[1:-1]
+            try:
+                inner = bytes(inner, "utf-8").decode("unicode_escape")
+            except Exception:
+                pass
+            out.append(inner)
+        else:
+            # bare / number / other
+            if val.startswith("--"):
+                continue
+            out.append(val)
+    return out
+
+
+def merge_dump_lists(*lists: list[str]) -> str:
+    """Merge multiple string lists (order preserved, first-seen wins) → dumpstring text."""
+    seen: set[str] = set()
+    merged: list[str] = []
+    for lst in lists:
+        for s in lst:
+            if not s or s in seen:
+                continue
+            if s.startswith("-- Generated") or s.startswith("--  http"):
+                continue
+            seen.add(s)
+            merged.append(s)
+    if not merged:
+        return "[NOTE] empty harvest\n\n-- 0 strings\n"
+    lines = [f"[{i}] = {_lua_str_literal(s)}" for i, s in enumerate(merged, 1)]
+    lines.append("")
+    lines.append(f"-- {len(merged)} strings")
+    return "\n".join(lines)
+
+
 def run_dump(source: str) -> str:
-    if not DUMP_ENGINE.is_file():
+
+    if not DUMP_ENGINE.is_file() and not V2_ENGINE.is_file():
         raise RuntimeError("engine missing")
 
     lune = ensure_lune()
@@ -178,35 +307,68 @@ def run_dump(source: str) -> str:
 
     env = os.environ.copy()
     env["PATH"] = f"{Path(lune).parent}:{env.get('PATH', '')}"
-    cmd = [lune, "run", str(DUMP_ENGINE), str(in_path), str(out_path)]
-    t0 = time.time()
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=DUMP_TIMEOUT,
-            cwd=str(TOOLS),
-            env=env,
-        )
-    except subprocess.TimeoutExpired as ex:
-        raise RuntimeError(f"dump timeout ({DUMP_TIMEOUT}s)") from ex
-    elapsed = time.time() - t0
 
-    stdout = (proc.stdout or "")
-    output = ""
-    if out_path.is_file():
-        output = out_path.read_text(encoding="utf-8", errors="replace")
-    if not output.strip() and stdout.strip():
-        output = stdout
-
-    for p in (in_path, out_path):
+    # Always run classic dumpstring for pool / concat / buffer / constant harvest
+    dumpstring_text = ""
+    if DUMP_ENGINE.is_file():
+        cmd_ds = [lune, "run", str(DUMP_ENGINE), str(in_path), str(out_path)]
+        log("[dump] engine=dumpstring (constants)")
         try:
-            p.unlink(missing_ok=True)
-        except OSError:
-            pass
+            subprocess.run(
+                cmd_ds, capture_output=True, text=True, timeout=DUMP_TIMEOUT,
+                cwd=str(TOOLS), env=env,
+            )
+            if out_path.is_file():
+                dumpstring_text = out_path.read_text(encoding="utf-8", errors="replace")
+        except subprocess.TimeoutExpired:
+            if out_path.is_file():
+                dumpstring_text = out_path.read_text(encoding="utf-8", errors="replace")
+            log("[dump] dumpstring timeout-partial")
+        except Exception as ex:
+            log("[dump] dumpstring err:", ex)
 
-    # strip any accidental path leaks from engine stdout
+    # Prefer V2 deep VM hooks for WRD / heavy obfuscators (runtime DETECT / print)
+    use_v2 = V2_ENGINE.is_file() and (
+        "wearedevs" in source.lower()
+        or "getfenv and getfenv()" in source
+        or "Prometheus" in source
+        or "IronBrew" in source
+        or "Luraph" in source
+        or len(source) > 20000
+    )
+    v2_text = ""
+    if use_v2:
+        log("[dump] engine=v2 (runtime)")
+        try:
+            in_path.write_text(source, encoding="utf-8", errors="replace")
+            subprocess.run(
+                [
+                    lune, "run", str(V2_ENGINE), str(in_path), str(out_path),
+                    "--WorkerMode=true", "--NoLogs=true",
+                    f"--TimeoutSeconds={max(30, DUMP_TIMEOUT - 5)}",
+                ],
+                capture_output=True, text=True, timeout=DUMP_TIMEOUT,
+                cwd=str(TOOLS), env=env,
+            )
+            if out_path.is_file():
+                v2_text = out_path.read_text(encoding="utf-8", errors="replace")
+        except subprocess.TimeoutExpired:
+            if out_path.is_file():
+                v2_text = out_path.read_text(encoding="utf-8", errors="replace")
+            log("[dump] v2 timeout-partial")
+        except Exception as ex:
+            log("[dump] v2 err:", ex)
+
+    # Merge: dumpstring constants first, then V2 runtime strings (DETECT etc.)
+    ds_list = parse_dumpstring_entries(dumpstring_text)
+    v2_list = parse_dumpstring_entries(v2_output_to_dumpstring(v2_text)) if v2_text else []
+    if ds_list or v2_list:
+        output = merge_dump_lists(ds_list, v2_list)
+    else:
+        output = dumpstring_text or v2_text or ""
+
+    elapsed = 0.0
+
     clean_lines = []
     for line in (output or "").splitlines():
         if re.search(r"/opt/render|tools/dump|/home/|/Users/", line):
@@ -214,6 +376,8 @@ def run_dump(source: str) -> str:
                 clean_lines.append("[NOTE] runtime stopped")
             continue
         if "[C]:" in line and "function" in line:
+            continue
+        if line.startswith("[diag]"):
             continue
         clean_lines.append(line)
     output = "\n".join(clean_lines).strip()
@@ -223,7 +387,13 @@ def run_dump(source: str) -> str:
 
     if not output.lstrip().startswith(BANNER.strip()):
         output = BANNER + "\n" + output
-    log(f"[dump] {elapsed:.2f}s out={len(output)}b code={proc.returncode}")
+    # cleanup job files
+    for pth in (in_path, out_path):
+        try:
+            pth.unlink(missing_ok=True)
+        except OSError:
+            pass
+    log(f"[dump] out={len(output)}b ds={len(ds_list)} v2={len(v2_list)}")
     return output
 
 

@@ -33,8 +33,15 @@ do
 		return nil
 	end
 	local cwd = (type(process) == "table" and type(process.cwd) == "string" and process.cwd) or "."
+	-- also search next to this script (tools/)
+	local scriptDir = cwd
+	pcall(function()
+		local s = debug and debug.info and debug.info(1, "s")
+	end)
 	local names = {
 		"RobloxFidelity.luau",
+		cwd .. "/RobloxFidelity.luau",
+		cwd .. "/tools/RobloxFidelity.luau",
 		"RobloxFidelity.lua",
 		"Libraries/RobloxFidelity.luau",
 		"Libraries/RobloxFidelity.lua",
@@ -74,7 +81,7 @@ if not okR or type(source) ~= "string" then
 	process.exit(1)
 end
 
-local BUDGET = 60
+local BUDGET = 90
 local started = os.clock()
 local dumpDead = false
 local function dumpCheck()
@@ -3207,6 +3214,183 @@ end
 
 
 
+
+
+-- ===== hookOp soft-arith (nil→0) + safe patterns =====
+do
+	local function nco(v)
+		local ty = type(v)
+		if ty == "number" then return v end
+		if ty == "string" then return tonumber(v) or 0 end
+		return 0
+	end
+	local H = {}
+	H.add = function(a, b) return nco(a) + nco(b) end
+	H.sub = function(a, b) return nco(a) - nco(b) end
+	H.mul = function(a, b) return nco(a) * nco(b) end
+	H.div = function(a, b)
+		local d = nco(b)
+		if d == 0 then return 0 end
+		return nco(a) / d
+	end
+	H.mod = function(a, b)
+		local d = nco(b)
+		if d == 0 then return 0 end
+		return nco(a) % d
+	end
+	H.pow = function(a, b)
+		if type(a) == "string" and type(b) == "number" then
+			local s = 0
+			for i = 1, #a do s += string.byte(a, i) end
+			return (s % 997) ^ b
+		end
+		return nco(a) ^ nco(b)
+	end
+	H.unm = function(a) return -nco(a) end
+	env.__H = H
+	env.__nco = nco
+	pcall(function()
+		local mt = getmetatable("")
+		if type(mt) == "table" and mt.__pow == nil then mt.__pow = H.pow end
+	end)
+end
+
+-- Safe pattern soft-op on VM body only (no full AST — avoids OOM on 100kb one-liners)
+do
+	local heavy = string.find(source, "wearedevs", 1, true)
+		or string.find(source, "Prometheus", 1, true)
+		or string.find(source, "IronBrew", 1, true)
+		or (#source > 8000)
+	if heavy then
+		local idxs, pos = {}, 1
+		while true do
+			local a, b = string.find(source, "return%s*%(%s*function", pos)
+			if not a then break end
+			idxs[#idxs + 1] = a
+			pos = b + 1
+			if #idxs >= 4 then break end
+		end
+		local head, body = "", source
+		if #idxs >= 2 then
+			head = string.sub(source, 1, idxs[2] - 1)
+			body = string.sub(source, idxs[2])
+		end
+		local function mapCode(code)
+			-- W[M]=W[M]-(expr)
+			code = string.gsub(code,
+				"([%a_][%w_]*)%[([%a_][%w_]*)%]%s*=%s*%1%[%2%]%s*%-%s*%(([^%(%)]*)%)",
+				"%1[%2]=__H.sub(%1[%2],(%3))")
+			code = string.gsub(code,
+				"([%a_][%w_]*)%[([%a_][%w_]*)%]%s*=%s*%1%[%2%]%s*%+%s*%(([^%(%)]*)%)",
+				"%1[%2]=__H.add(%1[%2],(%3))")
+			-- W[M]-(expr) / W[M]+(expr)
+			code = string.gsub(code,
+				"([%a_][%w_]*)%[([%a_][%w_]*)%]%s*%-%s*%(([^%(%)]*)%)",
+				"__H.sub(%1[%2],(%3))")
+			code = string.gsub(code,
+				"([%a_][%w_]*)%[([%a_][%w_]*)%]%s*%+%s*%(([^%(%)]*)%)",
+				"__H.add(%1[%2],(%3))")
+			-- A=(expr)+A / A=A+(expr)
+			code = string.gsub(code,
+				"([^%w_])([A-Za-z])%s*=%s*%(([^%(%)]*)%)%s*%+%s*%2",
+				"%1%2=__H.add((%3),%2)")
+			code = string.gsub(code,
+				"([^%w_])([A-Za-z])%s*=%s*%2%s*%+%s*%(([^%(%)]*)%)",
+				"%1%2=__H.add(%2,(%3))")
+			-- id(id)-(num)  f()-1 style when simple
+			code = string.gsub(code,
+				"([%a_][%w_]*%s*%(%s*[%a_][%w_]*%s*%))%s*%-%s*(%d+)",
+				"__H.sub(%1,%2)")
+			code = string.gsub(code,
+				"([%a_][%w_]*%s*%(%s*%))%s*%-%s*(%d+)",
+				"__H.sub(%1,%2)")
+			return code
+		end
+		-- map outside strings
+		local function mapOutside(s)
+			local o, i, n = {}, 1, #s
+			while i <= n do
+				local c = string.sub(s, i, i)
+				if c == '"' or c == "'" then
+					local q, j = c, i + 1
+					while j <= n do
+						local ch = string.sub(s, j, j)
+						if ch == "\\" and j < n then j += 2
+						elseif ch == q then j += 1; break
+						else j += 1 end
+					end
+					o[#o + 1] = string.sub(s, i, j - 1)
+					i = j
+				else
+					local j = i
+					while j <= n and string.sub(s, j, j) ~= '"' and string.sub(s, j, j) ~= "'" do j += 1 end
+					o[#o + 1] = mapCode(string.sub(s, i, j - 1))
+					i = j
+				end
+			end
+			return table.concat(o)
+		end
+		local okR, rewritten = pcall(mapOutside, body)
+		if okR and type(rewritten) == "string" then
+			local candidate = head .. rewritten
+			local okL = pcall(luau.load, candidate, { debugName = "hookop_pat" })
+			if okL then
+				source = candidate
+			end
+		end
+	end
+end
+
+-- ===== inject / vm-prearm (Lupro-style, no Lupro binary) =====
+env.__lpTick = function()
+	if os.clock() - started > BUDGET then
+		error("budget", 0)
+	end
+	return false
+end
+env.__lpLoop = function()
+	return true
+end
+
+-- vm-prearm: fill executor / Roblox holes so guest does not die on missing globals
+do
+	local softFn = function() return softProxy end
+	local names = {
+		"checkcaller","clonefunction","hookfunction","hookmetamethod",
+		"getrawmetatable","setrawmetatable","isexecutorclosure","checkclosure",
+		"iscclosure","islclosure","getgc","getreg","getconstants","getupvalues",
+		"setupvalue","getproto","getprotos","getinfo","replaceclosure","getscriptclosure",
+		"decompile","setfpscap","getfpscap","WebSocket","websocket",
+		"getgenv","getrenv","getfenv","setfenv","newcclosure","isluau",
+		"identifyexecutor","getexecutorname","isrbxactive","setclipboard","toclipboard",
+		"fireclickdetector","fireproximityprompt","firetouchinterest","getconnections",
+		"firesignal","gethui","gethiddenproperty","sethiddenproperty","setsimulationradius",
+		"Drawing","crypt","base64_encode","base64_decode","syn","fluxus","krnl",
+		"protectgui","unprotectgui","isreadonly","setreadonly","make_writeable",
+		"getnamecallmethod","setnamecallmethod","checkcaller",
+	}
+	for _, n in ipairs(names) do
+		if rawget(env, n) == nil then
+			env[n] = softFn
+		end
+	end
+	-- common aliases
+	env.shared = env.shared or env
+	env._G = env
+	env._ENV = env
+end
+
+-- Inject loop budget probes into source (safe, universal)
+do
+	if #source < 600000 then
+		source = string.gsub(source, "while%s+", "while __lpTick() or ")
+		source = string.gsub(source, "while __lpTick%(%) or __lpTick%(%) or ", "while __lpTick() or ")
+		source = string.gsub(source, "while true do", "while true do __lpTick();")
+		source = string.gsub(source, "while 1 do", "while 1 do __lpTick();")
+	end
+end
+
+
 -- GENERIC VM register rewrite: any multi-stage return(function)...return(function) obfuscator
 -- {} in the VM body → __reg() (numeric miss = 0). Applies to WRD, and similar packed VMs.
 do
@@ -3379,18 +3563,21 @@ end)(...)
 		end
 		-- WRD VMs often die on number+nil; retry with forced numeric metatable fallback via soft calls
 		runOk, runErr = pcall(chunk)
-		if not runOk and type(runErr) == "string" and string.find(runErr, "arithmetic", 1, true) then
-			-- second chance: already emitted pool strings; soft-note only
-			runOk = true
-			lines[#lines + 1] = "[NOTE] partial VM (arith)"
-		end
 		flushChar()
 		flushUtf8()
 		if not runOk and type(runErr) == "string" then
-			if not string.find(runErr, "budget", 1, true) then
-				lines[#lines + 1] = "[NOTE] runtime stopped: " .. string.sub(tostring(runErr), 1, 120)
-			else
+			local e = string.lower(runErr)
+			if string.find(e, "budget", 1, true) or string.find(e, "abort:", 1, true) then
 				lines[#lines + 1] = "[NOTE] budget"
+			elseif string.find(e, "arithmetic", 1, true) then
+				lines[#lines + 1] = "[NOTE] partial VM (arith)"
+			elseif string.find(e, "tamper", 1, true) or string.find(e, "detect", 1, true) then
+				lines[#lines + 1] = "[NOTE] anti-tamper"
+			elseif string.find(e, "syntax", 1, true) or string.find(e, "parse", 1, true) then
+				lines[#lines + 1] = "[NOTE] syntax"
+			else
+				-- never silent-crash: keep all harvested strings
+				lines[#lines + 1] = "[NOTE] runtime stopped"
 			end
 		end
 	end
@@ -3433,6 +3620,9 @@ end
 pcall(flushWord)
 pcall(flushChar)
 pcall(flushUtf8)
+if #lines == 0 then
+	lines[1] = "[NOTE] empty harvest"
+end
 local out = table.concat(lines, "\n")
 if #out == 0 then out = "[NOTE] no constants captured" end
 out ..= string.format("\n\n-- %d strings\n", emitIndex)
