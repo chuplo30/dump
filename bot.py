@@ -234,6 +234,35 @@ CODEBLOCK_RE = re.compile(
 URL_RE = re.compile(r"https?://[^\s<>\"')\]]+", re.I)
 
 
+async def extract_source_wrd(message: discord.Message) -> str:
+    """Attachment or inline code only — no URL for .wrd."""
+    for att in message.attachments:
+        if att.size and att.size > MAX_SOURCE:
+            raise RuntimeError("file too large")
+        data = await att.read()
+        if len(data) > MAX_SOURCE:
+            raise RuntimeError("file too large")
+        return data.decode("utf-8", errors="replace")
+
+    content = message.content or ""
+    m = CODEBLOCK_RE.search(content)
+    if m:
+        return m.group(1)
+
+    lines = content.split("\n")
+    if lines:
+        first = re.sub(r"^[.\s]*wrd\b", "", lines[0], count=1, flags=re.I).strip()
+        rest = "\n".join([first] + lines[1:]) if first else "\n".join(lines[1:])
+    else:
+        rest = content
+    rest = rest.strip()
+    if rest and URL_RE.fullmatch(rest):
+        raise RuntimeError("file or send a code block")
+    if rest:
+        return rest
+    raise RuntimeError("file or send a code block")
+
+
 async def extract_source(message: discord.Message) -> str:
     for att in message.attachments:
         if att.size and att.size > MAX_SOURCE:

@@ -76,6 +76,12 @@ end
 
 local BUDGET = 60
 local started = os.clock()
+local dumpDead = false
+local function dumpCheck()
+	if dumpDead then return true end
+	if os.clock() - started > BUDGET then dumpDead = true return true end
+	return false
+end
 local lines, seen, charBuf, utf8Buf = {}, {}, {}, {}
 
 -- Accept almost any printable / mixed string (minimal filter)
@@ -1387,7 +1393,7 @@ env.Region3int16 = env.Region3int16 or { new = function() return {} end }
 
 env.string = setmetatable({
 	char = function(...)
-		if os.clock() - started > BUDGET then error("budget", 0) end
+		if dumpCheck() then return "" end
 		local n = select("#", ...)
 		if n == 1 then
 			local b = tonumber((...))
@@ -1568,7 +1574,7 @@ if type(buffer) == "table" then
 	local _bops = 0
 	local function btick()
 		_bops = _bops + 1
-		if _bops % 2048 == 0 and os.clock() - started > BUDGET then error("budget", 0) end
+		if _bops % 256 == 0 and os.clock() - started > BUDGET then error("budget", 0) end
 	end
 	env.buffer = setmetatable({
 		create = function(...)
@@ -1767,7 +1773,7 @@ do
 				if type(f) ~= "function" then return f end
 				return function(...)
 					_ops = _ops + 1
-					if _ops % 4096 == 0 and os.clock() - started > BUDGET then error("budget", 0) end
+					if _ops % 512 == 0 and os.clock() - started > BUDGET then error("budget", 0) end
 					return f(...)
 				end
 			end,
@@ -2206,44 +2212,90 @@ if type(Fidelity) == "table" then
 		Fidelity.Clock.PhysicsTime = (Fidelity.Clock.PhysicsTime or 0) + s
 		return s
 	end
-	-- Logged setmetatable: emit string keys from __index
+	-- Budget-wrapped setmetatable: every metamethod ticks the clock (XHider-style VMs)
 	do
 		local hostSet = setmetatable
-		env.setmetatable = function(obj, mt)
-			if type(mt) == "table" and type(mt.__index) == "function" then
-				local orig = mt.__index
-				local w = {}
-				for k, v in pairs(mt) do w[k] = v end
-				w.__index = function(t, k)
-					if type(k) == "string" and #k >= 2 then emit("vm:mtindex", k) end
-					return orig(t, k)
+		local function wrapMt(mt)
+			if type(mt) ~= "table" then return mt end
+			local w = {}
+			for k, v in pairs(mt) do
+				if type(v) == "function" then
+					local fn = v
+					local key = k
+					w[k] = function(...)
+						if dumpCheck() then
+							-- soft-kill: pcall-safe, breaks arithmetic loops
+							if key == "__add" or key == "__sub" or key == "__mul" or key == "__div"
+								or key == "__pow" or key == "__mod" then
+								return 0
+							end
+							if key == "__eq" or key == "__lt" or key == "__le" then
+								return false
+							end
+							if key == "__len" then return 0 end
+							if key == "__concat" then return "" end
+							if key == "__tostring" then return "" end
+							if key == "__call" then return end
+							return nil
+						end
+						if key == "__index" then
+							local idx = select(2, ...)
+							if type(idx) == "string" and #idx >= 2 then
+								emit("vm:mtindex", idx)
+							end
+						end
+						return fn(...)
+					end
+				else
+					w[k] = v
 				end
-				return hostSet(obj, w)
-			elseif type(mt) == "table" and type(mt.__index) == "table" then
-				local idx = mt.__index
-				local w = {}
-				for k, v in pairs(mt) do w[k] = v end
-				w.__index = setmetatable({}, {
-					__index = function(_, k)
-						if type(k) == "string" and #k >= 2 then emit("vm:mtindex", k) end
-						return idx[k]
-					end,
-				})
-				return hostSet(obj, w)
 			end
-			return hostSet(obj, mt)
+			return w
 		end
+		env.setmetatable = function(obj, mt)
+			return hostSet(obj, wrapMt(mt))
+		end
+	end
+end -- Fidelity overlay
+
+-- Always install budget setmetatable even without Fidelity
+do
+	local hostSet = setmetatable
+	local function wrapMt(mt)
+		if type(mt) ~= "table" then return mt end
+		local w = {}
+		for k, v in pairs(mt) do
+			if type(v) == "function" then
+				local fn, key = v, k
+				w[k] = function(...)
+					if dumpCheck() then
+						if key == "__add" or key == "__sub" or key == "__mul" or key == "__div"
+							or key == "__pow" or key == "__mod" then return 0 end
+						if key == "__eq" or key == "__lt" or key == "__le" then return false end
+						if key == "__call" then return end
+						return nil
+					end
+					if key == "__index" then
+						local idx = select(2, ...)
+						if type(idx) == "string" and #idx >= 2 then emit("vm:mtindex", idx) end
+					end
+					return fn(...)
+				end
+			else
+				w[k] = v
+			end
+		end
+		return w
+	end
+	env.setmetatable = function(obj, mt)
+		return hostSet(obj, wrapMt(mt))
 	end
 end
 
--- Soft fallback: any missing global looks like a table with .new / callable
-local softNew = function() return softInst("Instance", "x") end
 local softTbl = setmetatable({}, {
-	__index = function(_, k)
-		if k == "new" then return softNew end
-		return function() return nil end
-	end,
-	__call = function() return softInst("Instance", "x") end,
+	__index = function() return function() return nil end end,
+	__newindex = function() end,
+	__call = function() return nil end,
 })
 setmetatable(env, {
 	__index = function(_, k)
@@ -2253,6 +2305,7 @@ setmetatable(env, {
 		return nil
 	end,
 })
+
 
 local envKeys, envVals = {}, {}
 for k, v in pairs(env) do
@@ -2265,6 +2318,221 @@ for i = 1, #envKeys do
 	_G[envKeys[i]] = envVals[i]
 end
 _G._G = env
+
+
+
+
+
+-- XHIDER_STATIC_DECODE: XHD ascii85 + per-file XOR keys (extracted, not hardcoded)
+do
+	local function xhAscii85(body)
+		if type(body) ~= "string" or #body < 2 then return nil end
+		local out = {}
+		local i = 1
+		local n = #body
+		while i <= n do
+			local remain = n - i + 1
+			local f = remain >= 5 and 5 or remain
+			if f < 2 then break end
+			local W = 0
+			if i + 4 > n then
+				for F = 1, f do
+					W = W * 0x55 + (string.byte(body, i + F - 1) - 0x21)
+				end
+				for _ = f + 1, 5 do
+					W = W * 0x55 + 0x54
+				end
+			else
+				for F = 0, 4 do
+					W = W * 0x55 + (string.byte(body, i + F) - 0x21)
+				end
+			end
+			local b0 = math.floor(W / 0x1000000) % 256
+			local b1 = math.floor(W / 0x10000) % 256
+			local b2 = math.floor(W / 0x100) % 256
+			local b3 = W % 256
+			if f == 5 then
+				out[#out + 1] = string.char(b0, b1, b2, b3)
+			elseif f == 4 then
+				out[#out + 1] = string.char(b0, b1, b2)
+			elseif f == 3 then
+				out[#out + 1] = string.char(b0, b1)
+			elseif f == 2 then
+				out[#out + 1] = string.char(b0)
+			end
+			i = i + f
+		end
+		local r = table.concat(out)
+		return #r > 0 and r or nil
+	end
+
+	local function xhInteresting(s)
+		if type(s) ~= "string" or #s < 2 or #s > 4000 then return false end
+		local good = 0
+		for i = 1, #s do
+			local b = string.byte(s, i)
+			if (b >= 32 and b <= 126) or b == 9 or b == 10 then good += 1 end
+		end
+		return good >= math.max(2, math.floor(#s * 0.7))
+	end
+
+	local function xhWalk(buf, keys)
+		local results = {}
+		local pos = 1
+		local guard = 0
+		while pos + 3 <= #buf and guard < 8000 do
+			guard += 1
+			local b0 = bit32.bxor(string.byte(buf, pos), keys[1])
+			local b1 = bit32.bxor(string.byte(buf, pos + 1), keys[2])
+			local b2 = bit32.bxor(string.byte(buf, pos + 2), keys[3])
+			local b3 = bit32.bxor(string.byte(buf, pos + 3), keys[4])
+			local len = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+			pos += 4
+			if len <= 0 or len > 20000 or pos + len - 1 > #buf then
+				pos = pos - 3
+			else
+				local chars = table.create(len)
+				for i = 1, len do
+					local k = keys[((i - 1) % 4) + 1]
+					chars[i] = string.char(bit32.bxor(string.byte(buf, pos + i - 1), k))
+				end
+				pos += len
+				local s = table.concat(chars)
+				if xhInteresting(s) then
+					results[#results + 1] = s
+				end
+			end
+		end
+		return results
+	end
+
+	local function xhScore(list)
+		local score = 0
+		for _, s in ipairs(list) do
+			score += #s
+			if string.match(s, "^[%a_][%w_]*$") then score += 8 end
+			if string.find(s, " ", 1, true) then score += 4 end
+		end
+		return score + #list * 3
+	end
+
+	-- Pull candidate 4-byte XOR keys from source (each XHider build differs)
+	local function xhExtractKeysets(src)
+		local keysets = {}
+		local seen = {}
+		local function add(a, b, c, d)
+			if type(a) ~= "number" then return end
+			a, b, c, d = a % 256, b % 256, c % 256, d % 256
+			local k = string.format("%d.%d.%d.%d", a, b, c, d)
+			if not seen[k] then
+				seen[k] = true
+				keysets[#keysets + 1] = { a, b, c, d }
+			end
+		end
+		-- {0xAD;0xEF,0xD0;0xE4} / {0xAD, 0xEF, 0xD0, 0xE4}
+		for a, b, c, d in string.gmatch(src, "0[xX](%x+)%s*[,;]%s*0[xX](%x+)%s*[,;]%s*0[xX](%x+)%s*[,;]%s*0[xX](%x+)") do
+			add(tonumber(a, 16), tonumber(b, 16), tonumber(c, 16), tonumber(d, 16))
+		end
+		-- decimal quartets that look like key bytes
+		for a, b, c, d in string.gmatch(src, "(%d+)%s*[,;]%s*(%d+)%s*[,;]%s*(%d+)%s*[,;]%s*(%d+)") do
+			local na, nb, nc, nd = tonumber(a), tonumber(b), tonumber(c), tonumber(d)
+			if na and nb and nc and nd and na < 256 and nb < 256 and nc < 256 and nd < 256 then
+				if (na + nb + nc + nd) > 0 then
+					add(na, nb, nc, nd)
+				end
+			end
+		end
+		-- folded expressions sometimes: no hex; leave empty if none
+		if #keysets == 0 then
+			-- last resort identity (no xor) + common legacy only as weak fallback
+			add(0, 0, 0, 0)
+		end
+		return keysets
+	end
+
+	local function xhExtractPayload(src)
+		local start = string.find(src, '"XHD:', 1, true)
+		if not start then return nil end
+		local parts = {}
+		local pos = start
+		local limit = math.min(#src, start + 120000)
+		while pos <= limit do
+			if string.sub(src, pos, pos) ~= '"' then
+				if string.sub(src, pos, pos) == "}" then break end
+				pos += 1
+			else
+				pos += 1
+				local buf = {}
+				while pos <= limit do
+					local c = string.sub(src, pos, pos)
+					if c == "\\" and pos < limit then
+						local n = string.sub(src, pos + 1, pos + 1)
+						if n == "n" then buf[#buf + 1] = "\n"; pos += 2
+						elseif n == "r" then buf[#buf + 1] = "\r"; pos += 2
+						elseif n == "t" then buf[#buf + 1] = "\t"; pos += 2
+						elseif n == "\\" or n == '"' or n == "'" then buf[#buf + 1] = n; pos += 2
+						else buf[#buf + 1] = n; pos += 2 end
+					elseif c == '"' then
+						pos += 1
+						break
+					else
+						buf[#buf + 1] = c
+						pos += 1
+					end
+				end
+				parts[#parts + 1] = table.concat(buf)
+				while pos <= limit do
+					local ch = string.sub(src, pos, pos)
+					if ch == " " or ch == "\t" or ch == "\n" or ch == "\r" or ch == "," or ch == ";" then
+						pos += 1
+					else
+						break
+					end
+				end
+				if string.sub(src, pos, pos) == "}" then break end
+				if string.sub(src, pos, pos) ~= '"' then break end
+			end
+		end
+		if #parts == 0 then return nil end
+		local joined = table.concat(parts)
+		if string.sub(joined, 1, 4) == "XHD:" then
+			return string.sub(joined, 5)
+		end
+		return joined
+	end
+
+	local isXh = string.find(source, "XHider", 1, true)
+		or string.find(source, "ynvq7ED4Sp", 1, true)
+		or string.find(source, "XHD:", 1, true)
+	if isXh then
+		emit("bytecode.const", "xhider")
+		local body = xhExtractPayload(source)
+		if type(body) == "string" and #body >= 20 then
+			local raw = xhAscii85(body)
+			if raw then
+				local keysets = xhExtractKeysets(source)
+				local bestList, bestScore = {}, -1
+				local bestKeys = nil
+				for _, keys in ipairs(keysets) do
+					local list = xhWalk(raw, keys)
+					local sc = xhScore(list)
+					if sc > bestScore then
+						bestScore, bestList, bestKeys = sc, list, keys
+					end
+				end
+				local seen = {}
+				for _, s in ipairs(bestList) do
+					if not seen[s] then
+						seen[s] = true
+						emit("xhider.decoded", s)
+						pcall(harvestCode, s, "xh")
+					end
+				end
+			end
+		end
+		pcall(harvestCode, source, "xhstatic")
+	end
+end
 
 -- Prefer environment table (Lune); fallback preamble for older Lune
 local loadOk, chunk
@@ -2296,7 +2564,12 @@ else
 	end
 	-- WeAreDevs: static T/m decode only — VM hits pow(string, number) in their interpreter
 	local runOk, runErr = true, nil
-	if isWeAreDevs then
+	local isXHider = string.find(source, "XHider", 1, true)
+		or string.find(source, "ynvq7ED4Sp", 1, true)
+		or string.find(source, "XHD:", 1, true)
+	-- WeAreDevs: static pool only. XHider: MUST run VM so char/concat/loadstring hooks fire (AZT-style).
+	if isWeAreDevs or isXHider then
+		-- XHider/WRD: static self-decode path (Lune has no debug.sethook; VM loops cannot be preempted)
 		runOk = true
 	else
 		runOk, runErr = pcall(chunk)
