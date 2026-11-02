@@ -122,7 +122,7 @@ local function emit(src, s)
 	if string.match(flat, "[%z\1-\8\11\12\14-\31]") then
 		flat = (string.gsub(flat, ".", function(c)
 			local b = string.byte(c)
-			if b < 32 or b > 126 then return string.format("\\%d", b) end
+			if b < 32 then return string.format("\\%d", b) end
 			return c
 		end))
 	end

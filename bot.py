@@ -168,18 +168,64 @@ def fetch_url(url: str) -> str:
 
 
 
-def _lua_str_literal(s: str) -> str:
-    """Format a Python str as a Lua long-safe quoted string for dump listing."""
-    s = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-    # non-printable → \ddd
+
+def _safe_lua_unescape(s: str) -> str:
+    """Decode Lua \\n/\\ddd escapes without breaking UTF-8 Vietnamese."""
+    if not s or "\\" not in s:
+        return s
     out = []
-    for ch in s:
+    i, n = 0, len(s)
+    while i < n:
+        if s[i] == "\\" and i + 1 < n:
+            nxt = s[i + 1]
+            if nxt == "n":
+                out.append("\n"); i += 2; continue
+            if nxt == "r":
+                out.append("\r"); i += 2; continue
+            if nxt == "t":
+                out.append("\t"); i += 2; continue
+            if nxt == "\\":
+                out.append("\\"); i += 2; continue
+            if nxt == '"':
+                out.append('"'); i += 2; continue
+            if nxt == "'":
+                out.append("'"); i += 2; continue
+            if nxt.isdigit():
+                j = i + 1
+                while j < n and j < i + 4 and s[j].isdigit():
+                    j += 1
+                out.append(chr(int(s[i + 1:j]) & 255))
+                i = j
+                continue
+            out.append(nxt); i += 2; continue
+        out.append(s[i]); i += 1
+    return "".join(out)
+
+
+def _lua_str_literal(s: str) -> str:
+    """Format as Luau quoted string. Keep UTF-8 (Vietnamese); only escape controls + quotes."""
+    if s is None:
+        return '""'
+    out = ['"']
+    for ch in str(s):
         o = ord(ch)
-        if o < 32 or o > 126:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif o < 32:
             out.append(f"\\{o}")
         else:
-            out.append(ch)
-    return '"' + "".join(out) + '"'
+            out.append(ch)  # UTF-8 kept (Tiếng Việt, etc.)
+    out.append('"')
+    return "".join(out)
+
 
 
 def v2_output_to_dumpstring(text: str) -> str:
@@ -213,7 +259,7 @@ def v2_output_to_dumpstring(text: str) -> str:
         raw = m.group(1) if m.group(1) is not None else m.group(2)
         if raw is not None:
             try:
-                raw = bytes(raw, "utf-8").decode("unicode_escape")
+                raw = _safe_lua_unescape(raw)
             except Exception:
                 pass
             add(raw)
@@ -222,7 +268,7 @@ def v2_output_to_dumpstring(text: str) -> str:
     for m in re.finditer(r'"((?:\\.|[^"\\])*)"', text):
         raw = m.group(1)
         try:
-            raw = bytes(raw, "utf-8").decode("unicode_escape")
+            raw = _safe_lua_unescape(raw)
         except Exception:
             pass
         if len(raw) >= 1:
@@ -262,7 +308,7 @@ def parse_dumpstring_entries(text: str) -> list[str]:
         if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
             inner = val[1:-1]
             try:
-                inner = bytes(inner, "utf-8").decode("unicode_escape")
+                inner = _safe_lua_unescape(inner)
             except Exception:
                 pass
             out.append(inner)
